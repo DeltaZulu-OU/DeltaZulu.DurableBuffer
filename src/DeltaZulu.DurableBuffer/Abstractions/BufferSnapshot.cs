@@ -1,3 +1,5 @@
+using System;
+
 namespace DeltaZulu.DurableBuffer.Abstractions;
 
 public sealed record BufferSnapshot

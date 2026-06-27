@@ -62,14 +62,14 @@ public sealed class FileChunkStoreTests
         var chunkId = ChunkId.NewChunkId();
         var (data, meta) = BuildSealedChunk(chunkId.Value, "hello", "world");
 
-        var stored = await _store.SealAsync(chunkId, data, meta);
+        var stored = await _store.SealAsync(chunkId, data, meta, TestContext.CancellationToken);
 
         Assert.IsTrue(File.Exists(stored.ChunkFilePath));
         Assert.IsTrue(File.Exists(stored.MetadataFilePath));
         Assert.Contains("sealed", stored.ChunkFilePath);
         Assert.AreEqual(chunkId, stored.Id);
 
-        var savedData = await File.ReadAllBytesAsync(stored.ChunkFilePath);
+        var savedData = await File.ReadAllBytesAsync(stored.ChunkFilePath, TestContext.CancellationToken);
         CollectionAssert.AreEqual(data, savedData);
     }
 
@@ -79,9 +79,9 @@ public sealed class FileChunkStoreTests
         var chunkId = ChunkId.NewChunkId();
         var (data, meta) = BuildSealedChunk(chunkId.Value, "test");
 
-        var stored = await _store.SealAsync(chunkId, data, meta);
+        var stored = await _store.SealAsync(chunkId, data, meta, TestContext.CancellationToken);
 
-        var json = await File.ReadAllBytesAsync(stored.MetadataFilePath);
+        var json = await File.ReadAllBytesAsync(stored.MetadataFilePath, TestContext.CancellationToken);
         var deserialized = JsonSerializer.Deserialize<ChunkMetadata>(json);
         Assert.IsNotNull(deserialized);
         Assert.AreEqual(meta.RecordCount, deserialized.RecordCount);
@@ -92,9 +92,9 @@ public sealed class FileChunkStoreTests
     {
         var chunkId = ChunkId.NewChunkId();
         var (data, meta) = BuildSealedChunk(chunkId.Value, "record1");
-        var sealed_ = await _store.SealAsync(chunkId, data, meta);
+        var sealed_ = await _store.SealAsync(chunkId, data, meta, TestContext.CancellationToken);
 
-        var dispatching = await _store.MoveToDispatchingAsync(sealed_);
+        var dispatching = await _store.MoveToDispatchingAsync(sealed_, TestContext.CancellationToken);
 
         Assert.IsFalse(File.Exists(sealed_.ChunkFilePath));
         Assert.IsTrue(File.Exists(dispatching.ChunkFilePath));
@@ -106,9 +106,9 @@ public sealed class FileChunkStoreTests
     {
         var chunkId = ChunkId.NewChunkId();
         var (data, meta) = BuildSealedChunk(chunkId.Value, "record1");
-        var sealed_ = await _store.SealAsync(chunkId, data, meta);
+        var sealed_ = await _store.SealAsync(chunkId, data, meta, TestContext.CancellationToken);
 
-        var deadLettered = await _store.MoveToDeadLetterAsync(sealed_);
+        var deadLettered = await _store.MoveToDeadLetterAsync(sealed_, TestContext.CancellationToken);
 
         Assert.IsFalse(File.Exists(sealed_.ChunkFilePath));
         Assert.IsTrue(File.Exists(deadLettered.ChunkFilePath));
@@ -120,11 +120,11 @@ public sealed class FileChunkStoreTests
     {
         var chunkId = ChunkId.NewChunkId();
         var (data, meta) = BuildSealedChunk(chunkId.Value, "record1");
-        var sealed_ = await _store.SealAsync(chunkId, data, meta);
-        var dispatching = await _store.MoveToDispatchingAsync(sealed_);
+        var sealed_ = await _store.SealAsync(chunkId, data, meta, TestContext.CancellationToken);
+        var dispatching = await _store.MoveToDispatchingAsync(sealed_, TestContext.CancellationToken);
 
         var updatedMeta = dispatching.Metadata with { AttemptCount = 3, LastError = "timeout" };
-        var backToSealed = await _store.MoveToSealedAsync(dispatching, updatedMeta);
+        var backToSealed = await _store.MoveToSealedAsync(dispatching, updatedMeta, TestContext.CancellationToken);
 
         Assert.Contains("sealed", backToSealed.ChunkFilePath);
         Assert.AreEqual(3, backToSealed.Metadata.AttemptCount);
@@ -136,9 +136,9 @@ public sealed class FileChunkStoreTests
     {
         var chunkId = ChunkId.NewChunkId();
         var (data, meta) = BuildSealedChunk(chunkId.Value, "record1");
-        var stored = await _store.SealAsync(chunkId, data, meta);
+        var stored = await _store.SealAsync(chunkId, data, meta, TestContext.CancellationToken);
 
-        await _store.DeleteAsync(stored);
+        await _store.DeleteAsync(stored, TestContext.CancellationToken);
 
         Assert.IsFalse(File.Exists(stored.ChunkFilePath));
         Assert.IsFalse(File.Exists(stored.MetadataFilePath));
@@ -152,10 +152,10 @@ public sealed class FileChunkStoreTests
         var (data1, meta1) = BuildSealedChunk(id1.Value, "a");
         var (data2, meta2) = BuildSealedChunk(id2.Value, "b");
 
-        await _store.SealAsync(id1, data1, meta1);
-        await _store.SealAsync(id2, data2, meta2);
+        await _store.SealAsync(id1, data1, meta1, TestContext.CancellationToken);
+        await _store.SealAsync(id2, data2, meta2, TestContext.CancellationToken);
 
-        var chunks = await _store.GetSealedChunksAsync();
+        var chunks = await _store.GetSealedChunksAsync(TestContext.CancellationToken);
         Assert.HasCount(2, chunks);
     }
 
@@ -164,10 +164,10 @@ public sealed class FileChunkStoreTests
     {
         var chunkId = ChunkId.NewChunkId();
         var (data, meta) = BuildSealedChunk(chunkId.Value, "a");
-        var sealed_ = await _store.SealAsync(chunkId, data, meta);
-        await _store.MoveToDispatchingAsync(sealed_);
+        var sealed_ = await _store.SealAsync(chunkId, data, meta, TestContext.CancellationToken);
+        await _store.MoveToDispatchingAsync(sealed_, TestContext.CancellationToken);
 
-        var chunks = await _store.GetDispatchingChunksAsync();
+        var chunks = await _store.GetDispatchingChunksAsync(TestContext.CancellationToken);
         Assert.HasCount(1, chunks);
     }
 
@@ -176,9 +176,9 @@ public sealed class FileChunkStoreTests
     {
         var chunkId = ChunkId.NewChunkId();
         var (data, meta) = BuildSealedChunk(chunkId.Value, "hello", "world");
-        await _store.SealAsync(chunkId, data, meta);
+        await _store.SealAsync(chunkId, data, meta, TestContext.CancellationToken);
 
-        var bytesUsed = await _store.GetDiskBytesUsedAsync();
+        var bytesUsed = await _store.GetDiskBytesUsedAsync(TestContext.CancellationToken);
         Assert.IsGreaterThan(0, bytesUsed);
     }
 
@@ -186,9 +186,9 @@ public sealed class FileChunkStoreTests
     public async Task QuarantineAsync_MovesToQuarantineDir()
     {
         var filePath = Path.Combine(_basePath, "active", "test.tmp");
-        await File.WriteAllTextAsync(filePath, "junk");
+        await File.WriteAllTextAsync(filePath, "junk", TestContext.CancellationToken);
 
-        await _store.QuarantineAsync(filePath);
+        await _store.QuarantineAsync(filePath, TestContext.CancellationToken);
 
         Assert.IsFalse(File.Exists(filePath));
         var quarantineFiles = Directory.GetFiles(Path.Combine(_basePath, "quarantine"));
@@ -207,9 +207,11 @@ public sealed class FileChunkStoreTests
             PayloadBytes = 10,
             Checksum = "sha256:abc"
         };
-        await File.WriteAllBytesAsync(metaFile, JsonSerializer.SerializeToUtf8Bytes(meta));
+        await File.WriteAllBytesAsync(metaFile, JsonSerializer.SerializeToUtf8Bytes(meta), TestContext.CancellationToken);
 
-        var chunks = await _store.GetSealedChunksAsync();
+        var chunks = await _store.GetSealedChunksAsync(TestContext.CancellationToken);
         Assert.IsEmpty(chunks);
     }
+
+    public TestContext TestContext { get; set; }
 }

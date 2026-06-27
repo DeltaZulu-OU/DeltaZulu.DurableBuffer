@@ -46,7 +46,10 @@ public sealed class BufferIntegrationTests
         public int AttemptCount;
         private readonly ChunkSendStatus _status;
 
-        public FailingSender(ChunkSendStatus status = ChunkSendStatus.TransientFailure) => _status = status;
+        public FailingSender(ChunkSendStatus status = ChunkSendStatus.TransientFailure)
+        {
+            _status = status;
+        }
 
         public ValueTask<ChunkSendResult> SendAsync(StoredChunk chunk, CancellationToken cancellationToken = default)
         {
@@ -68,16 +71,16 @@ public sealed class BufferIntegrationTests
         };
 
         await using var host = new DurableBufferHost<string>(options, new JsonRecordSerializer<string>(), sender);
-        await host.StartAsync();
+        await host.StartAsync(TestContext.CancellationToken);
 
-        var r1 = await host.Buffer.WriteAsync("record1");
-        var r2 = await host.Buffer.WriteAsync("record2");
+        var r1 = await host.Buffer.WriteAsync("record1", TestContext.CancellationToken);
+        var r2 = await host.Buffer.WriteAsync("record2", TestContext.CancellationToken);
 
         Assert.AreEqual(BufferWriteStatus.Accepted, r1.Status);
         Assert.AreEqual(BufferWriteStatus.Accepted, r2.Status);
 
-        await Task.Delay(500);
-        await host.StopAsync();
+        await Task.Delay(500, TestContext.CancellationToken);
+        await host.StopAsync(TestContext.CancellationToken);
 
         Assert.IsGreaterThanOrEqualTo(1, sender.SendCount);
     }
@@ -95,12 +98,12 @@ public sealed class BufferIntegrationTests
         };
 
         await using var host = new DurableBufferHost<string>(options, new JsonRecordSerializer<string>(), sender);
-        await host.StartAsync();
+        await host.StartAsync(TestContext.CancellationToken);
 
-        await host.Buffer.WriteAsync("pending1");
-        await host.Buffer.WriteAsync("pending2");
+        await host.Buffer.WriteAsync("pending1", TestContext.CancellationToken);
+        await host.Buffer.WriteAsync("pending2", TestContext.CancellationToken);
 
-        await host.StopAsync();
+        await host.StopAsync(TestContext.CancellationToken);
 
         Assert.IsGreaterThanOrEqualTo(1, sender.SendCount);
     }
@@ -118,15 +121,15 @@ public sealed class BufferIntegrationTests
         };
 
         await using var host = new DurableBufferHost<string>(options, new JsonRecordSerializer<string>(), sender);
-        await host.StartAsync();
+        await host.StartAsync(TestContext.CancellationToken);
 
-        await host.Buffer.WriteAsync("test");
+        await host.Buffer.WriteAsync("test", TestContext.CancellationToken);
         var snapshot = host.Buffer.GetSnapshot();
 
         Assert.IsGreaterThanOrEqualTo(1, snapshot.RecordsAcceptedTotal);
         Assert.IsGreaterThan(0, snapshot.OpenChunkBytes);
 
-        await host.StopAsync();
+        await host.StopAsync(TestContext.CancellationToken);
     }
 
     [TestMethod]
@@ -146,8 +149,8 @@ public sealed class BufferIntegrationTests
         await using var host = new DurableBufferHost<string>(options, new JsonRecordSerializer<string>(), sender);
         host.Events.Subscribe(new EventCollector(events));
 
-        await host.StartAsync();
-        await host.StopAsync();
+        await host.StartAsync(TestContext.CancellationToken);
+        await host.StopAsync(TestContext.CancellationToken);
 
         Assert.Contains(e => e.EventType == BufferEventType.BufferStarted, events);
         Assert.Contains(e => e.EventType == BufferEventType.BufferStopped, events);
@@ -166,10 +169,10 @@ public sealed class BufferIntegrationTests
         };
 
         await using var host = new DurableBufferHost<string>(options, new JsonRecordSerializer<string>(), sender);
-        await host.StartAsync();
-        await host.StopAsync();
+        await host.StartAsync(TestContext.CancellationToken);
+        await host.StopAsync(TestContext.CancellationToken);
 
-        var result = await host.Buffer.WriteAsync("too-late");
+        var result = await host.Buffer.WriteAsync("too-late", TestContext.CancellationToken);
         Assert.AreEqual(BufferWriteStatus.RejectedStopping, result.Status);
     }
 
@@ -190,10 +193,10 @@ public sealed class BufferIntegrationTests
         await using var host = new DurableBufferHost<string>(options, new JsonRecordSerializer<string>(), sender);
         host.Events.Subscribe(new EventCollector(events));
 
-        await host.StartAsync();
-        await host.Buffer.WriteAsync("doomed");
-        await Task.Delay(1000);
-        await host.StopAsync();
+        await host.StartAsync(TestContext.CancellationToken);
+        await host.Buffer.WriteAsync("doomed", TestContext.CancellationToken);
+        await Task.Delay(1000, TestContext.CancellationToken);
+        await host.StopAsync(TestContext.CancellationToken);
 
         Assert.Contains(e => e.EventType == BufferEventType.BufferChunkDeadLettered, events);
         var deadLetterDir = Path.Combine(_storagePath, "deadletter");
@@ -214,14 +217,14 @@ public sealed class BufferIntegrationTests
         };
 
         await using var host = new DurableBufferHost<string>(options, new JsonRecordSerializer<string>(), sender);
-        await host.StartAsync();
+        await host.StartAsync(TestContext.CancellationToken);
 
         var largeRecord = new string('x', 300);
-        var result = await host.Buffer.WriteAsync(largeRecord);
+        var result = await host.Buffer.WriteAsync(largeRecord, TestContext.CancellationToken);
 
         Assert.AreEqual(BufferWriteStatus.RejectedRecordTooLarge, result.Status);
 
-        await host.StopAsync();
+        await host.StopAsync(TestContext.CancellationToken);
     }
 
     [TestMethod]
@@ -247,7 +250,7 @@ public sealed class BufferIntegrationTests
         {
             builder.Append(Encoding.UTF8.GetBytes("\"old\""));
             var (data, metadata) = builder.Seal();
-            await store.SealAsync(oldChunkId, data, metadata with { ChunkId = oldChunkId.Value });
+            await store.SealAsync(oldChunkId, data, metadata with { ChunkId = oldChunkId.Value }, TestContext.CancellationToken);
         }
 
         using var buffer = new DurableBuffer<string>(
@@ -260,8 +263,8 @@ public sealed class BufferIntegrationTests
             dispatchChannel.Writer);
         metrics.AddDiskBytes(options.MaxDiskBytes);
 
-        var result = await buffer.WriteAsync("new");
-        await buffer.FlushAsync();
+        var result = await buffer.WriteAsync("new", TestContext.CancellationToken);
+        await buffer.FlushAsync(TestContext.CancellationToken);
 
         Assert.AreEqual(BufferWriteStatus.DroppedOldestAndAccepted, result.Status);
         Assert.IsFalse(File.Exists(Path.Combine(_storagePath, "sealed", $"{oldChunkId.Value}.chunk")));
@@ -279,4 +282,6 @@ public sealed class BufferIntegrationTests
             }
         }
     }
+
+    public TestContext TestContext { get; set; }
 }

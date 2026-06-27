@@ -1,18 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <OutputType>Library</OutputType>
-    <PackageId>DeltaZulu.DurableBuffer</PackageId>
-    <Title>DeltaZulu Durable Buffer</Title>
-    <Description>Durable disk-backed buffering, retry, backpressure, recovery, and dead-lettering for .NET.</Description>
-    <Authors>DeltaZulu</Authors>
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <IsPackable>true</IsPackable>
+	<TargetFramework>net10.0</TargetFramework>
+	<OutputType>Library</OutputType>
+	<PackageId>DeltaZulu.DurableBuffer</PackageId>
+	<Title>DeltaZulu Durable Buffer</Title>
+	<Description>Durable disk-backed buffering, retry, backpressure, recovery, and dead-lettering for .NET.</Description>
+	<Authors>DeltaZulu</Authors>
+	<GenerateDocumentationFile>true</GenerateDocumentationFile>
+	<IsPackable>true</IsPackable>
+	<ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <InternalsVisibleTo Include="DeltaZulu.DurableBuffer.Tests" />
+	<InternalsVisibleTo Include="DeltaZulu.DurableBuffer.Tests" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
+	<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
   </ItemGroup>
 </Project>
