@@ -1,0 +1,45 @@
+using DeltaZulu.DurableBuffer.Abstractions;
+using DeltaZulu.DurableBuffer.Configuration;
+
+namespace DeltaZulu.DurableBuffer;
+
+internal sealed class BackpressureController
+{
+    private readonly DurableBufferOptions _options;
+    private const double PressureThreshold = 0.85;
+
+    public BackpressureController(DurableBufferOptions options)
+    {
+        _options = options;
+    }
+
+    public (BufferState State, bool ShouldAccept) Evaluate(
+        long diskBytesUsed,
+        long memoryBytesUsed,
+        int retryQueueDepth)
+    {
+        if (diskBytesUsed >= _options.MaxDiskBytes || memoryBytesUsed >= _options.MaxMemoryBytes)
+        {
+            return (BufferState.Full, false);
+        }
+
+        var diskRatio = _options.MaxDiskBytes > 0
+            ? (double)diskBytesUsed / _options.MaxDiskBytes
+            : 0;
+        var memRatio = _options.MaxMemoryBytes > 0
+            ? (double)memoryBytesUsed / _options.MaxMemoryBytes
+            : 0;
+
+        if (diskRatio > PressureThreshold || memRatio > PressureThreshold)
+        {
+            return (BufferState.Pressured, true);
+        }
+
+        if (retryQueueDepth > 0)
+        {
+            return (BufferState.Degraded, true);
+        }
+
+        return (BufferState.Healthy, true);
+    }
+}
