@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using DeltaZulu.DurableBuffer.Chunks;
 using Microsoft.Extensions.Logging;
@@ -7,14 +8,28 @@ namespace DeltaZulu.DurableBuffer.Storage;
 internal sealed class FileChunkStore : IChunkStore
 {
     private readonly ILogger? _logger;
+    private readonly long _maxDeadLetterBytes;
+    private readonly long _maxQuarantineBytes;
+    private readonly Action<StoredChunk>? _onDeadLetterEvicted;
+    private readonly Action<string, long>? _onQuarantineEvicted;
 
-    public FileChunkStore(string basePath, ILogger? logger = null)
+    public FileChunkStore(
+        string basePath,
+        ILogger? logger = null,
+        long maxDeadLetterBytes = long.MaxValue,
+        long maxQuarantineBytes = long.MaxValue,
+        Action<StoredChunk>? onDeadLetterEvicted = null,
+        Action<string, long>? onQuarantineEvicted = null)
     {
         SealedPath = Path.Combine(basePath, "sealed");
         DispatchingPath = Path.Combine(basePath, "dispatching");
         DeadLetterPath = Path.Combine(basePath, "deadletter");
         QuarantinePath = Path.Combine(basePath, "quarantine");
         _logger = logger;
+        _maxDeadLetterBytes = maxDeadLetterBytes;
+        _maxQuarantineBytes = maxQuarantineBytes;
+        _onDeadLetterEvicted = onDeadLetterEvicted;
+        _onQuarantineEvicted = onQuarantineEvicted;
 
         EnsureDirectories(basePath);
     }
@@ -100,10 +115,14 @@ internal sealed class FileChunkStore : IChunkStore
         return ValueTask.CompletedTask;
     }
 
-    public ValueTask<StoredChunk> MoveToDeadLetterAsync(
+    public async ValueTask<StoredChunk> MoveToDeadLetterAsync(
         StoredChunk chunk,
-        CancellationToken cancellationToken = default) =>
-        MoveChunkAsync(chunk, DeadLetterPath);
+        CancellationToken cancellationToken = default)
+    {
+        var moved = await MoveChunkAsync(chunk, DeadLetterPath);
+        await TrimDeadLetterAsync(cancellationToken);
+        return moved;
+    }
 
     public ValueTask QuarantineAsync(string filePath, CancellationToken cancellationToken = default)
     {
@@ -122,22 +141,30 @@ internal sealed class FileChunkStore : IChunkStore
         CancellationToken cancellationToken = default) =>
         ScanDirectoryAsync(DispatchingPath, cancellationToken);
 
-    public ValueTask<long> GetDiskBytesUsedAsync(CancellationToken cancellationToken = default)
-    {
-        long total = 0;
-        foreach (var dir in new[] { SealedPath, DispatchingPath, DeadLetterPath, QuarantinePath })
-        {
-            if (!Directory.Exists(dir))
-            {
-                continue;
-            }
+    public ValueTask<long> GetDiskBytesUsedAsync(CancellationToken cancellationToken = default) =>
+           // Dead-letter and quarantine data is abandoned data with its own bounded ring-buffer
+           // budget (see GetDeadLetterBytesUsedAsync/GetQuarantineBytesUsedAsync); it must not
+           // compete with live, still-retryable chunks for the buffer's backpressure quota.
+           ValueTask.FromResult(GetDirectoryBytes(SealedPath) + GetDirectoryBytes(DispatchingPath));
 
-            foreach (var file in Directory.EnumerateFiles(dir))
-            {
-                total += new FileInfo(file).Length;
-            }
+    public ValueTask<long> GetDeadLetterBytesUsedAsync(CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(GetDirectoryBytes(DeadLetterPath));
+
+    public ValueTask<long> GetQuarantineBytesUsedAsync(CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(GetDirectoryBytes(QuarantinePath));
+
+    private static long GetDirectoryBytes(string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return 0;
         }
-        return ValueTask.FromResult(total);
+        long total = 0;
+        foreach (var file in Directory.EnumerateFiles(directory))
+        {
+            total += new FileInfo(file).Length;
+        }
+        return total;
     }
 
     private ValueTask<StoredChunk> MoveChunkAsync(StoredChunk chunk, string targetDir)
@@ -155,6 +182,94 @@ internal sealed class FileChunkStore : IChunkStore
             ChunkFilePath = targetChunk,
             MetadataFilePath = targetMeta
         });
+    }
+
+    private async ValueTask TrimDeadLetterAsync(CancellationToken cancellationToken)
+    {
+        if (_maxDeadLetterBytes == long.MaxValue)
+        {
+            return;
+        }
+
+        var chunks = await ScanDirectoryAsync(DeadLetterPath, cancellationToken);
+        if (chunks.Count == 0)
+        {
+            return;
+        }
+
+        // Evict oldest-by-original-record-age first: a chunk that was only just
+        // dead-lettered after exhausting retries is still old data if its source
+        // records are old, so ordering is by CreatedUtc, not by dead-letter arrival time.
+        var ordered = chunks.OrderBy(static c => c.Metadata.CreatedUtc).ToList();
+        var total = ordered.Sum(GetChunkFileBytes);
+
+        var index = 0;
+        while (total > _maxDeadLetterBytes && index < ordered.Count)
+        {
+            var evicted = ordered[index++];
+            total -= GetChunkFileBytes(evicted);
+            SafeDelete(evicted.ChunkFilePath);
+            SafeDelete(evicted.MetadataFilePath);
+            _onDeadLetterEvicted?.Invoke(evicted);
+        }
+    }
+
+    private void TrimQuarantine()
+    {
+        if (_maxQuarantineBytes == long.MaxValue || !Directory.Exists(QuarantinePath))
+        {
+            return;
+        }
+
+        var files = Directory.EnumerateFiles(QuarantinePath)
+            .Select(path => new FileInfo(path))
+            .OrderBy(GetQuarantineTimestamp)
+            .ToList();
+
+        var total = files.Sum(f => f.Length);
+
+        var index = 0;
+        while (total > _maxQuarantineBytes && index < files.Count)
+        {
+            var file = files[index++];
+            total -= file.Length;
+            SafeDelete(file.FullName);
+            _onQuarantineEvicted?.Invoke(file.FullName, file.Length);
+        }
+    }
+
+    private static long GetChunkFileBytes(StoredChunk chunk)
+    {
+        long total = 0;
+        if (File.Exists(chunk.ChunkFilePath))
+        {
+            total += new FileInfo(chunk.ChunkFilePath).Length;
+        }
+
+        if (File.Exists(chunk.MetadataFilePath))
+        {
+            total += new FileInfo(chunk.MetadataFilePath).Length;
+        }
+
+        return total;
+    }
+
+    private static DateTimeOffset GetQuarantineTimestamp(FileInfo file)
+    {
+        const string prefix = "quarantined_";
+        if (file.Name.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            var afterPrefix = file.Name[prefix.Length..];
+            var separatorIndex = afterPrefix.IndexOf('_');
+            var token = separatorIndex >= 0 ? afterPrefix[..separatorIndex] : afterPrefix;
+            if (DateTimeOffset.TryParseExact(
+                token, "yyyyMMddTHHmmssfffZ", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed))
+            {
+                return parsed;
+            }
+        }
+
+        return file.LastWriteTimeUtc;
     }
 
     private async ValueTask<IReadOnlyList<StoredChunk>> ScanDirectoryAsync(

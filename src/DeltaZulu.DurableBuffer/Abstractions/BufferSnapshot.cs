@@ -18,4 +18,10 @@ public sealed record BufferSnapshot
     public required long ChunksFailedTotal { get; init; }
     public required long ChunksRetryScheduledTotal { get; init; }
     public required long ChunksDeadLetteredTotal { get; init; }
+    public required long DeadLetterBytesUsed { get; init; }
+    public required long DeadLetterBytesLimit { get; init; }
+    public required long QuarantineBytesUsed { get; init; }
+    public required long QuarantineBytesLimit { get; init; }
+    public required long ChunksDeadLetterEvictedTotal { get; init; }
+    public required long ChunksQuarantineEvictedTotal { get; init; }
 }

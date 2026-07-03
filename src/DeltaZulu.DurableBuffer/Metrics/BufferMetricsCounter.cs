@@ -15,9 +15,15 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
     private long _chunksRetried;
     private long _chunksDeadLettered;
     private long _chunksQuarantined;
+    private long _chunksDeadLetterEvicted;
+    private long _chunksQuarantineEvicted;
     private int _state;
     private long _diskBytesUsed;
     private long _diskBytesLimit;
+    private long _deadLetterBytesUsed;
+    private long _deadLetterBytesLimit;
+    private long _quarantineBytesUsed;
+    private long _quarantineBytesLimit;
     private long _memoryBytesUsed;
     private long _openChunkBytes;
     private int _sealedChunkCount;
@@ -46,12 +52,28 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
 
     public void ChunkQuarantined() => Interlocked.Increment(ref _chunksQuarantined);
 
+    public void ChunkDeadLetterEvicted() => Interlocked.Increment(ref _chunksDeadLetterEvicted);
+
+    public void ChunkQuarantineEvicted() => Interlocked.Increment(ref _chunksQuarantineEvicted);
+
     public void UpdateState(BufferState state) => Volatile.Write(ref _state, (int)state);
 
     public void UpdateDiskUsage(long bytesUsed, long bytesLimit)
     {
         Interlocked.Exchange(ref _diskBytesUsed, bytesUsed);
         Interlocked.Exchange(ref _diskBytesLimit, bytesLimit);
+    }
+
+    public void UpdateDeadLetterUsage(long bytesUsed, long bytesLimit)
+    {
+        Interlocked.Exchange(ref _deadLetterBytesUsed, bytesUsed);
+        Interlocked.Exchange(ref _deadLetterBytesLimit, bytesLimit);
+    }
+
+    public void UpdateQuarantineUsage(long bytesUsed, long bytesLimit)
+    {
+        Interlocked.Exchange(ref _quarantineBytesUsed, bytesUsed);
+        Interlocked.Exchange(ref _quarantineBytesLimit, bytesLimit);
     }
 
     public void UpdateMemoryUsage(long bytesUsed) => Interlocked.Exchange(ref _memoryBytesUsed, bytesUsed);
@@ -67,6 +89,10 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
     internal long DiskBytesUsed => Interlocked.Read(ref _diskBytesUsed);
 
     internal void AddDiskBytes(long bytes) => Interlocked.Add(ref _diskBytesUsed, bytes);
+
+    internal void AddDeadLetterBytes(long bytes) => Interlocked.Add(ref _deadLetterBytesUsed, bytes);
+
+    internal void AddQuarantineBytes(long bytes) => Interlocked.Add(ref _quarantineBytesUsed, bytes);
 
     public BufferSnapshot ToSnapshot()
     {
@@ -87,7 +113,13 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
             ChunksDeliveredTotal = Interlocked.Read(ref _chunksDelivered),
             ChunksFailedTotal = Interlocked.Read(ref _chunksFailed),
             ChunksRetryScheduledTotal = Interlocked.Read(ref _chunksRetried),
-            ChunksDeadLetteredTotal = Interlocked.Read(ref _chunksDeadLettered)
+            ChunksDeadLetteredTotal = Interlocked.Read(ref _chunksDeadLettered),
+            DeadLetterBytesUsed = Interlocked.Read(ref _deadLetterBytesUsed),
+            DeadLetterBytesLimit = Interlocked.Read(ref _deadLetterBytesLimit),
+            QuarantineBytesUsed = Interlocked.Read(ref _quarantineBytesUsed),
+            QuarantineBytesLimit = Interlocked.Read(ref _quarantineBytesLimit),
+            ChunksDeadLetterEvictedTotal = Interlocked.Read(ref _chunksDeadLetterEvicted),
+            ChunksQuarantineEvictedTotal = Interlocked.Read(ref _chunksQuarantineEvicted)
         };
     }
 }

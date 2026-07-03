@@ -196,6 +196,101 @@ public sealed class FileChunkStoreTests
     }
 
     [TestMethod]
+    public async Task GetDiskBytesUsedAsync_ExcludesDeadLetterAndQuarantine()
+    {
+        var chunkId = ChunkId.NewChunkId();
+        var (data, meta) = BuildSealedChunk(chunkId.Value, "hello");
+        var sealed_ = await _store.SealAsync(chunkId, data, meta, TestContext.CancellationToken);
+        await _store.MoveToDeadLetterAsync(sealed_, TestContext.CancellationToken);
+
+        var quarantineFile = Path.Combine(_basePath, "active", "corrupt.tmp");
+        await File.WriteAllTextAsync(quarantineFile, "junk", TestContext.CancellationToken);
+        await _store.QuarantineAsync(quarantineFile, TestContext.CancellationToken);
+
+        var liveBytes = await _store.GetDiskBytesUsedAsync(TestContext.CancellationToken);
+        Assert.AreEqual(0, liveBytes);
+
+        var deadLetterBytes = await _store.GetDeadLetterBytesUsedAsync(TestContext.CancellationToken);
+        Assert.IsGreaterThan(0, deadLetterBytes);
+
+        var quarantineBytes = await _store.GetQuarantineBytesUsedAsync(TestContext.CancellationToken);
+        Assert.IsGreaterThan(0, quarantineBytes);
+    }
+
+    [TestMethod]
+    public async Task MoveToDeadLetterAsync_EvictsOldestByOriginalAgeWhenOverCapacity()
+    {
+        var basePath = Path.Combine(Path.GetTempPath(), $"dz_test_{Guid.NewGuid():N}");
+        try
+        {
+            var oldId = ChunkId.NewChunkId();
+            var (oldData, oldMetaBase) = BuildSealedChunk(oldId.Value, "old-record");
+            var oldMeta = oldMetaBase with { CreatedUtc = DateTimeOffset.UtcNow.AddDays(-1) };
+            var singleChunkBytes = oldData.Length + JsonSerializer.SerializeToUtf8Bytes(oldMeta).Length;
+
+            var evicted = new List<StoredChunk>();
+            var store = new FileChunkStore(
+                basePath,
+                maxDeadLetterBytes: singleChunkBytes + 16,
+                onDeadLetterEvicted: evicted.Add);
+
+            var oldSealed = await store.SealAsync(oldId, oldData, oldMeta, TestContext.CancellationToken);
+            await store.MoveToDeadLetterAsync(oldSealed, TestContext.CancellationToken);
+
+            var newId = ChunkId.NewChunkId();
+            var (newData, newMeta) = BuildSealedChunk(newId.Value, "new-record");
+            var newSealed = await store.SealAsync(newId, newData, newMeta, TestContext.CancellationToken);
+            await store.MoveToDeadLetterAsync(newSealed, TestContext.CancellationToken);
+
+            Assert.HasCount(1, evicted);
+            Assert.AreEqual(oldId, evicted[0].Id);
+
+            var remainingFiles = Directory.GetFiles(Path.Combine(basePath, "deadletter"));
+            Assert.HasCount(2, remainingFiles);
+            Assert.IsTrue(remainingFiles.Any(f => f.Contains(newId.Value, StringComparison.Ordinal)));
+        }
+        finally
+        {
+            try { Directory.Delete(basePath, true); } catch { }
+        }
+    }
+
+    [TestMethod]
+    public async Task QuarantineAsync_EvictsOldestWhenOverCapacity()
+    {
+        var basePath = Path.Combine(Path.GetTempPath(), $"dz_test_{Guid.NewGuid():N}");
+        try
+        {
+            var evicted = new List<(string Path, long Bytes)>();
+            var store = new FileChunkStore(
+                basePath,
+                maxQuarantineBytes: 10,
+                onQuarantineEvicted: (path, bytes) => evicted.Add((path, bytes)));
+
+            var file1 = Path.Combine(basePath, "active", "first.tmp");
+            await File.WriteAllTextAsync(file1, "12345", TestContext.CancellationToken);
+            await store.QuarantineAsync(file1, TestContext.CancellationToken);
+
+            await Task.Delay(20, TestContext.CancellationToken);
+
+            var file2 = Path.Combine(basePath, "active", "second.tmp");
+            await File.WriteAllTextAsync(file2, "1234567890", TestContext.CancellationToken);
+            await store.QuarantineAsync(file2, TestContext.CancellationToken);
+
+            Assert.HasCount(1, evicted);
+            Assert.Contains("first.tmp", evicted[0].Path);
+
+            var remaining = Directory.GetFiles(Path.Combine(basePath, "quarantine"));
+            Assert.HasCount(1, remaining);
+            Assert.Contains("second.tmp", remaining[0]);
+        }
+        finally
+        {
+            try { Directory.Delete(basePath, true); } catch { }
+        }
+    }
+
+    [TestMethod]
     public async Task GetSealedChunksAsync_SkipsOrphanMetadata()
     {
         var metaFile = Path.Combine(_basePath, "sealed", "orphan.meta.json");

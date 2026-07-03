@@ -203,6 +203,9 @@ internal sealed class DispatchWorker
 
             case ChunkSendStatus.PermanentFailure:
                 var deadLettered = await _store.MoveToDeadLetterAsync(dispatching, cancellationToken);
+                _metrics.AddDiskBytes(-dispatching.Metadata.PayloadBytes);
+                _metrics.AddDeadLetterBytes(dispatching.Metadata.PayloadBytes);
+                _signalSpaceAvailable?.Invoke();
                 _metrics.ChunkDeadLettered();
                 _events.Publish(BufferEvent.Create(
                     BufferEventType.BufferChunkDeadLettered, deadLettered.Id.Value,
@@ -227,6 +230,9 @@ internal sealed class DispatchWorker
             if (_options.RetryExhaustedPolicy == RetryExhaustedPolicy.DeadLetter)
             {
                 var deadLettered = await _store.MoveToDeadLetterAsync(chunk, cancellationToken);
+                _metrics.AddDiskBytes(-chunk.Metadata.PayloadBytes);
+                _metrics.AddDeadLetterBytes(chunk.Metadata.PayloadBytes);
+                _signalSpaceAvailable?.Invoke();
                 _metrics.ChunkDeadLettered();
                 _events.Publish(BufferEvent.Create(
                     BufferEventType.BufferChunkDeadLettered, deadLettered.Id.Value,

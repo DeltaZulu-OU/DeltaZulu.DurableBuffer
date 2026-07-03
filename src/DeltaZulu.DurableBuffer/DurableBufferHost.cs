@@ -52,7 +52,23 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
 
         _store = new FileChunkStore(
             options.StoragePath,
-            loggerFactory?.CreateLogger<FileChunkStore>());
+            loggerFactory?.CreateLogger<FileChunkStore>(),
+            options.MaxDeadLetterBytes,
+            options.MaxQuarantineBytes,
+            onDeadLetterEvicted: evicted => {
+                _metrics.AddDeadLetterBytes(-evicted.Metadata.PayloadBytes);
+                _metrics.ChunkDeadLetterEvicted();
+                _eventBroadcaster.Publish(BufferEvent.Create(
+                    BufferEventType.BufferDeadLetterEvicted, evicted.Id.Value,
+                    detail: "Dead-letter capacity exceeded; evicted oldest chunk", chunk: evicted));
+            },
+            onQuarantineEvicted: (path, bytes) => {
+                _metrics.AddQuarantineBytes(-bytes);
+                _metrics.ChunkQuarantineEvicted();
+                _eventBroadcaster.Publish(BufferEvent.Create(
+                    BufferEventType.BufferQuarantineEvicted,
+                    detail: $"Quarantine capacity exceeded; evicted {Path.GetFileName(path)}"));
+            });
         var store = _store;
 
         var scheduler = retryScheduler ?? new ExponentialBackoffRetryScheduler(options);
@@ -95,6 +111,12 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
 
         var diskUsed = await _store.GetDiskBytesUsedAsync(_cts.Token);
         _metrics.UpdateDiskUsage(diskUsed, _options.MaxDiskBytes);
+
+        var deadLetterBytesUsed = await _store.GetDeadLetterBytesUsedAsync(_cts.Token);
+        _metrics.UpdateDeadLetterUsage(deadLetterBytesUsed, _options.MaxDeadLetterBytes);
+
+        var quarantineBytesUsed = await _store.GetQuarantineBytesUsedAsync(_cts.Token);
+        _metrics.UpdateQuarantineUsage(quarantineBytesUsed, _options.MaxQuarantineBytes);
 
         _rotationTask = Task.Run(() => RunRotationTimerAsync(_cts.Token), _cts.Token);
 

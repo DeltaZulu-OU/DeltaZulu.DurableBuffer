@@ -12,6 +12,8 @@ public sealed class DurableBufferOptionsTests
 
         Assert.AreEqual(512L * 1024 * 1024, options.MaxDiskBytes);
         Assert.AreEqual(32L * 1024 * 1024, options.MaxMemoryBytes);
+        Assert.AreEqual(64L * 1024 * 1024, options.MaxDeadLetterBytes);
+        Assert.AreEqual(64L * 1024 * 1024, options.MaxQuarantineBytes);
         Assert.AreEqual(1000, options.MaxChunkRecords);
         Assert.AreEqual(4L * 1024 * 1024, options.MaxChunkBytes);
         Assert.AreEqual(TimeSpan.FromSeconds(5), options.MaxChunkAge);

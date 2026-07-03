@@ -8,8 +8,7 @@ public sealed class BufferSnapshotTests
     [TestMethod]
     public void Snapshot_ReflectsAllProperties()
     {
-        var snapshot = new BufferSnapshot
-        {
+        var snapshot = new BufferSnapshot {
             State = BufferState.Degraded,
             DiskBytesUsed = 100_000,
             DiskBytesLimit = 512L * 1024 * 1024,
@@ -25,7 +24,13 @@ public sealed class BufferSnapshotTests
             ChunksDeliveredTotal = 10,
             ChunksFailedTotal = 2,
             ChunksRetryScheduledTotal = 1,
-            ChunksDeadLetteredTotal = 1
+            ChunksDeadLetteredTotal = 1,
+            DeadLetterBytesLimit = 10_000,
+            DeadLetterBytesUsed = 0,
+            QuarantineBytesLimit = 10_000,
+            QuarantineBytesUsed = 0,
+            ChunksDeadLetterEvictedTotal = 0,
+            ChunksQuarantineEvictedTotal = 0
         };
 
         Assert.AreEqual(BufferState.Degraded, snapshot.State);

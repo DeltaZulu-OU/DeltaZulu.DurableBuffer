@@ -26,9 +26,17 @@ public interface IBufferMetrics
 
     void ChunkQuarantined();
 
+    void ChunkDeadLetterEvicted();
+
+    void ChunkQuarantineEvicted();
+
     void UpdateState(BufferState state);
 
     void UpdateDiskUsage(long bytesUsed, long bytesLimit);
+
+    void UpdateDeadLetterUsage(long bytesUsed, long bytesLimit);
+
+    void UpdateQuarantineUsage(long bytesUsed, long bytesLimit);
 
     void UpdateMemoryUsage(long bytesUsed);
 

@@ -20,7 +20,9 @@ public enum BufferEventType
     BufferPressureExited,
     BufferRecoveryStarted,
     BufferRecoveryCompleted,
-    BufferFileQuarantined
+    BufferFileQuarantined,
+    BufferDeadLetterEvicted,
+    BufferQuarantineEvicted
 }
 
 public sealed record BufferEvent

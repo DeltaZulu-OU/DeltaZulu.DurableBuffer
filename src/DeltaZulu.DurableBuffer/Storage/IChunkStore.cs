@@ -39,4 +39,10 @@ public interface IChunkStore
 
     ValueTask<long> GetDiskBytesUsedAsync(
         CancellationToken cancellationToken = default);
+
+    ValueTask<long> GetDeadLetterBytesUsedAsync(
+        CancellationToken cancellationToken = default);
+
+    ValueTask<long> GetQuarantineBytesUsedAsync(
+        CancellationToken cancellationToken = default);
 }
