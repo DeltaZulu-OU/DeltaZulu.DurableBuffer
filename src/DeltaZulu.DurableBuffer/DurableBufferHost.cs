@@ -142,8 +142,11 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         }
 
         _eventBroadcaster.Publish(BufferEvent.Create(BufferEventType.BufferStopped));
-        _eventBroadcaster.Complete();
 
+        // Consumers may still be finishing work for chunks they read before the
+        // channel completed. Keep observers subscribed until disposal so those
+        // terminal chunk events (for example dead-letter notifications) are not
+        // dropped during StopAsync.
         _started = false;
         _logger?.LogInformation("Buffer host stopped.");
     }
@@ -160,6 +163,7 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
             await StopAsync();
         }
 
+        _eventBroadcaster.Complete();
         _buffer.Dispose();
         _cts?.Dispose();
         _disposed = true;
