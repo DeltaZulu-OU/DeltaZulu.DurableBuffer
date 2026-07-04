@@ -25,9 +25,4 @@ public sealed record DurableBufferOptions
     public TimeSpan MaxChunkAge { get; init; } = TimeSpan.FromSeconds(5);
 
     public BufferFullPolicy FullPolicy { get; init; } = BufferFullPolicy.Block;
-    public RetryExhaustedPolicy RetryExhaustedPolicy { get; init; } = RetryExhaustedPolicy.DeadLetter;
-
-    public int MaxRetryAttempts { get; init; } = 10;
-    public TimeSpan RetryBaseDelay { get; init; } = TimeSpan.FromSeconds(1);
-    public TimeSpan RetryMaxDelay { get; init; } = TimeSpan.FromMinutes(5);
 }

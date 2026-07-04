@@ -18,20 +18,9 @@ public sealed class BackpressureControllerTests
     {
         var controller = new BackpressureController(DefaultOptions);
 
-        var (state, accept) = controller.Evaluate(diskBytesUsed: 100, memoryBytesUsed: 10, retryQueueDepth: 0);
+        var (state, accept) = controller.Evaluate(diskBytesUsed: 100, memoryBytesUsed: 10);
 
         Assert.AreEqual(BufferState.Healthy, state);
-        Assert.IsTrue(accept);
-    }
-
-    [TestMethod]
-    public void Evaluate_Degraded_WhenRetryQueueNotEmpty()
-    {
-        var controller = new BackpressureController(DefaultOptions);
-
-        var (state, accept) = controller.Evaluate(diskBytesUsed: 100, memoryBytesUsed: 10, retryQueueDepth: 1);
-
-        Assert.AreEqual(BufferState.Degraded, state);
         Assert.IsTrue(accept);
     }
 
@@ -40,7 +29,7 @@ public sealed class BackpressureControllerTests
     {
         var controller = new BackpressureController(DefaultOptions);
 
-        var (state, accept) = controller.Evaluate(diskBytesUsed: 860, memoryBytesUsed: 10, retryQueueDepth: 0);
+        var (state, accept) = controller.Evaluate(diskBytesUsed: 860, memoryBytesUsed: 10);
 
         Assert.AreEqual(BufferState.Pressured, state);
         Assert.IsTrue(accept);
@@ -51,7 +40,7 @@ public sealed class BackpressureControllerTests
     {
         var controller = new BackpressureController(DefaultOptions);
 
-        var (state, accept) = controller.Evaluate(diskBytesUsed: 100, memoryBytesUsed: 86, retryQueueDepth: 0);
+        var (state, accept) = controller.Evaluate(diskBytesUsed: 100, memoryBytesUsed: 86);
 
         Assert.AreEqual(BufferState.Pressured, state);
         Assert.IsTrue(accept);
@@ -62,7 +51,7 @@ public sealed class BackpressureControllerTests
     {
         var controller = new BackpressureController(DefaultOptions);
 
-        var (state, accept) = controller.Evaluate(diskBytesUsed: 1000, memoryBytesUsed: 10, retryQueueDepth: 0);
+        var (state, accept) = controller.Evaluate(diskBytesUsed: 1000, memoryBytesUsed: 10);
 
         Assert.AreEqual(BufferState.Full, state);
         Assert.IsFalse(accept);
@@ -73,7 +62,7 @@ public sealed class BackpressureControllerTests
     {
         var controller = new BackpressureController(DefaultOptions);
 
-        var (state, accept) = controller.Evaluate(diskBytesUsed: 100, memoryBytesUsed: 100, retryQueueDepth: 0);
+        var (state, accept) = controller.Evaluate(diskBytesUsed: 100, memoryBytesUsed: 100);
 
         Assert.AreEqual(BufferState.Full, state);
         Assert.IsFalse(accept);
@@ -84,29 +73,18 @@ public sealed class BackpressureControllerTests
     {
         var controller = new BackpressureController(DefaultOptions);
 
-        var (state, accept) = controller.Evaluate(diskBytesUsed: 1500, memoryBytesUsed: 10, retryQueueDepth: 0);
+        var (state, accept) = controller.Evaluate(diskBytesUsed: 1500, memoryBytesUsed: 10);
 
         Assert.AreEqual(BufferState.Full, state);
         Assert.IsFalse(accept);
     }
 
     [TestMethod]
-    public void Evaluate_Pressured_TakesPrecedenceOverDegraded()
+    public void Evaluate_Full_TakesPrecedenceOverPressured()
     {
         var controller = new BackpressureController(DefaultOptions);
 
-        var (state, accept) = controller.Evaluate(diskBytesUsed: 860, memoryBytesUsed: 10, retryQueueDepth: 5);
-
-        Assert.AreEqual(BufferState.Pressured, state);
-        Assert.IsTrue(accept);
-    }
-
-    [TestMethod]
-    public void Evaluate_Full_TakesPrecedenceOverAll()
-    {
-        var controller = new BackpressureController(DefaultOptions);
-
-        var (state, accept) = controller.Evaluate(diskBytesUsed: 1000, memoryBytesUsed: 100, retryQueueDepth: 10);
+        var (state, accept) = controller.Evaluate(diskBytesUsed: 1000, memoryBytesUsed: 100);
 
         Assert.AreEqual(BufferState.Full, state);
         Assert.IsFalse(accept);
@@ -117,7 +95,7 @@ public sealed class BackpressureControllerTests
     {
         var controller = new BackpressureController(DefaultOptions);
 
-        var (state, _) = controller.Evaluate(diskBytesUsed: 850, memoryBytesUsed: 85, retryQueueDepth: 0);
+        var (state, _) = controller.Evaluate(diskBytesUsed: 850, memoryBytesUsed: 85);
 
         Assert.AreEqual(BufferState.Healthy, state);
     }

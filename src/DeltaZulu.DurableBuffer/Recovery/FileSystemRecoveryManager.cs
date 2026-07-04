@@ -43,36 +43,6 @@ internal sealed class FileSystemRecoveryManager : IRecoveryManager
         quarantined += await QuarantineActiveChunksAsync(cancellationToken);
         estimatedLost += quarantined > 0 ? -1 : 0; // unknown record count
 
-        var dispatchingChunks = await _store.GetDispatchingChunksAsync(cancellationToken);
-        foreach (var chunk in dispatchingChunks)
-        {
-            try
-            {
-                if (!await ValidateChunkAsync(chunk, cancellationToken))
-                {
-                    await _store.QuarantineAsync(chunk.ChunkFilePath, cancellationToken);
-                    SafeDelete(chunk.MetadataFilePath);
-                    quarantined++;
-                    _metrics.ChunkQuarantined();
-                    _events.Publish(BufferEvent.Create(
-                        BufferEventType.BufferFileQuarantined, chunk.Id.Value,
-                        detail: "Checksum mismatch on recovery"));
-                    continue;
-                }
-
-                var sealed_ = await _store.MoveToSealedAsync(
-                    chunk, chunk.Metadata with { AttemptCount = 0, NextAttemptUtc = null, LastError = null },
-                    cancellationToken);
-                await _dispatchWriter.WriteAsync(sealed_, cancellationToken);
-                recovered++;
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning(ex, "Failed to recover dispatching chunk {ChunkId}", chunk.Id);
-                quarantined++;
-            }
-        }
-
         var sealedChunks = await _store.GetSealedChunksAsync(cancellationToken);
         foreach (var chunk in sealedChunks)
         {
@@ -164,7 +134,7 @@ internal sealed class FileSystemRecoveryManager : IRecoveryManager
     private async Task<int> QuarantineOrphanFilesAsync(CancellationToken cancellationToken)
     {
         var count = 0;
-        foreach (var dir in new[] { Path.Combine(_basePath, "sealed"), Path.Combine(_basePath, "dispatching") })
+        foreach (var dir in new[] { Path.Combine(_basePath, "sealed") })
         {
             if (!Directory.Exists(dir))
             {

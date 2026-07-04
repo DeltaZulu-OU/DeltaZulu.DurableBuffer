@@ -7,7 +7,7 @@ using DeltaZulu.DurableBuffer.Storage;
 
 namespace DeltaZulu.DurableBuffer;
 
-internal sealed class DurableBuffer<T> : IDurableBuffer<T>, IDisposable
+internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
 {
     private readonly IRecordSerializer<T> _serializer;
     private readonly IChunkStore _store;
@@ -15,7 +15,7 @@ internal sealed class DurableBuffer<T> : IDurableBuffer<T>, IDisposable
     private readonly BufferMetricsCounter _metrics;
     private readonly BufferEventBroadcaster _events;
     private readonly BackpressureController _backpressure;
-    private readonly ChannelWriter<StoredChunk> _dispatchWriter;
+    private readonly ChannelWriter<StoredChunk> _chunkWriter;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ChunkBuilder _chunkBuilder;
     private volatile bool _stopping;
@@ -28,7 +28,7 @@ internal sealed class DurableBuffer<T> : IDurableBuffer<T>, IDisposable
         BufferMetricsCounter metrics,
         BufferEventBroadcaster events,
         BackpressureController backpressure,
-        ChannelWriter<StoredChunk> dispatchWriter)
+        ChannelWriter<StoredChunk> chunkWriter)
     {
         _serializer = serializer;
         _store = store;
@@ -36,7 +36,7 @@ internal sealed class DurableBuffer<T> : IDurableBuffer<T>, IDisposable
         _metrics = metrics;
         _events = events;
         _backpressure = backpressure;
-        _dispatchWriter = dispatchWriter;
+        _chunkWriter = chunkWriter;
         _chunkBuilder = new ChunkBuilder(options);
 
         _metrics.UpdateDiskUsage(0, options.MaxDiskBytes);
@@ -169,7 +169,7 @@ internal sealed class DurableBuffer<T> : IDurableBuffer<T>, IDisposable
         _events.Publish(BufferEvent.Create(
             BufferEventType.BufferChunkSealed, storedChunk.Id.Value, chunk: storedChunk));
 
-        await _dispatchWriter.WriteAsync(storedChunk, cancellationToken);
+        await _chunkWriter.WriteAsync(storedChunk, cancellationToken);
 
         _chunkBuilder.Reset();
         _metrics.ChunkCreated();
@@ -187,9 +187,8 @@ internal sealed class DurableBuffer<T> : IDurableBuffer<T>, IDisposable
         {
             var diskUsed = _metrics.DiskBytesUsed;
             var memUsed = _chunkBuilder.CurrentBytes;
-            const int retryDepth = 0;
 
-            var (state, shouldAccept) = _backpressure.Evaluate(diskUsed, memUsed, retryDepth);
+            var (state, shouldAccept) = _backpressure.Evaluate(diskUsed, memUsed);
             var previousState = (BufferState)Volatile.Read(ref _lastState);
 
             if (state != previousState)

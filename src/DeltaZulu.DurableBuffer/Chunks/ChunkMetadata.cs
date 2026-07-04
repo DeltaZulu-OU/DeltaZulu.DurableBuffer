@@ -22,15 +22,6 @@ public sealed record ChunkMetadata
     [JsonPropertyName("checksum")]
     public required string Checksum { get; init; }
 
-    [JsonPropertyName("attemptCount")]
-    public int AttemptCount { get; init; }
-
-    [JsonPropertyName("nextAttemptUtc")]
-    public DateTimeOffset? NextAttemptUtc { get; init; }
-
-    [JsonPropertyName("lastError")]
-    public string? LastError { get; init; }
-
     [JsonPropertyName("source")]
     public string Source { get; init; } = "DeltaZulu.Agent";
 }

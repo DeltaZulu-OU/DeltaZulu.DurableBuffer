@@ -35,9 +35,7 @@ public sealed class BufferEventTests
             CreatedUtc = DateTimeOffset.UtcNow,
             RecordCount = 50,
             PayloadBytes = 4096,
-            Checksum = "sha256:abc",
-            AttemptCount = 10,
-            LastError = "Connection refused"
+            Checksum = "sha256:abc"
         };
 
         var chunk = new StoredChunk
@@ -59,7 +57,6 @@ public sealed class BufferEventTests
         Assert.IsNotNull(evt.Chunk);
         Assert.AreEqual("/buffer/deadletter/chunk.bin", evt.Chunk.ChunkFilePath);
         Assert.AreEqual(50, evt.Chunk.Metadata.RecordCount);
-        Assert.AreEqual(10, evt.Chunk.Metadata.AttemptCount);
     }
 
     [TestMethod]

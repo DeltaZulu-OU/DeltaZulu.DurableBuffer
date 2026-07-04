@@ -2,10 +2,8 @@ using System.Threading.Channels;
 using DeltaZulu.DurableBuffer.Abstractions;
 using DeltaZulu.DurableBuffer.Chunks;
 using DeltaZulu.DurableBuffer.Configuration;
-using DeltaZulu.DurableBuffer.Dispatch;
 using DeltaZulu.DurableBuffer.Metrics;
 using DeltaZulu.DurableBuffer.Recovery;
-using DeltaZulu.DurableBuffer.Retry;
 using DeltaZulu.DurableBuffer.Storage;
 using Microsoft.Extensions.Logging;
 
@@ -14,16 +12,15 @@ namespace DeltaZulu.DurableBuffer;
 public sealed class DurableBufferHost<T> : IAsyncDisposable
 {
     private readonly DurableBuffer<T> _buffer;
-    private readonly DispatchWorker _dispatchWorker;
+    private readonly DurableBufferReader _reader;
     private readonly FileSystemRecoveryManager _recoveryManager;
     private readonly BufferEventBroadcaster _eventBroadcaster;
     private readonly BufferMetricsCounter _metrics;
     private readonly FileChunkStore _store;
-    private readonly Channel<StoredChunk> _dispatchChannel;
+    private readonly Channel<StoredChunk> _chunkChannel;
     private readonly DurableBufferOptions _options;
     private readonly ILogger? _logger;
 
-    private Task? _dispatchTask;
     private Task? _rotationTask;
     private CancellationTokenSource? _cts;
     private bool _started;
@@ -32,8 +29,6 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
     public DurableBufferHost(
         DurableBufferOptions options,
         IRecordSerializer<T> serializer,
-        IChunkSender sender,
-        IRetryScheduler? retryScheduler = null,
         ILoggerFactory? loggerFactory = null)
     {
         _options = options;
@@ -43,9 +38,9 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         _metrics = new BufferMetricsCounter();
         _metrics.UpdateDiskUsage(0, options.MaxDiskBytes);
 
-        _dispatchChannel = Channel.CreateBounded<StoredChunk>(
+        _chunkChannel = Channel.CreateBounded<StoredChunk>(
             new BoundedChannelOptions(1024) {
-                SingleReader = true,
+                SingleReader = false,
                 SingleWriter = false,
                 FullMode = BoundedChannelFullMode.Wait
             });
@@ -69,28 +64,26 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
                     BufferEventType.BufferQuarantineEvicted,
                     detail: $"Quarantine capacity exceeded; evicted {Path.GetFileName(path)}"));
             });
-        var store = _store;
 
-        var scheduler = retryScheduler ?? new ExponentialBackoffRetryScheduler(options);
         var backpressure = new BackpressureController(options);
 
         _buffer = new DurableBuffer<T>(
-            serializer, store, options, _metrics,
-            _eventBroadcaster, backpressure, _dispatchChannel.Writer);
+            serializer, _store, options, _metrics,
+            _eventBroadcaster, backpressure, _chunkChannel.Writer);
 
-        _dispatchWorker = new DispatchWorker(
-            _dispatchChannel.Reader, sender, store, scheduler,
-            options, _metrics, _eventBroadcaster,
-            loggerFactory?.CreateLogger<DispatchWorker>(),
+        _reader = new DurableBufferReader(
+            _chunkChannel.Reader, _chunkChannel.Writer,
+            _store, _metrics, _eventBroadcaster,
             _buffer.SignalSpaceAvailable);
 
         _recoveryManager = new FileSystemRecoveryManager(
-            store, _dispatchChannel.Writer, _metrics,
+            _store, _chunkChannel.Writer, _metrics,
             _eventBroadcaster, options.StoragePath,
             loggerFactory?.CreateLogger<FileSystemRecoveryManager>());
     }
 
-    public IDurableBuffer<T> Buffer => _buffer;
+    public IDurableBufferWriter<T> Writer => _buffer;
+    public IDurableBufferReader Reader => _reader;
     public IObservable<BufferEvent> Events => _eventBroadcaster;
 
     public async ValueTask StartAsync(CancellationToken cancellationToken = default)
@@ -104,8 +97,6 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
         _eventBroadcaster.Publish(BufferEvent.Create(BufferEventType.BufferStarted));
-
-        _dispatchTask = Task.Run(() => _dispatchWorker.RunAsync(_cts.Token), _cts.Token);
 
         await _recoveryManager.RecoverAsync(_cts.Token);
 
@@ -136,24 +127,7 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
 
         await _buffer.FlushAsync(cancellationToken);
 
-        _dispatchChannel.Writer.TryComplete();
-
-        if (_dispatchTask is not null)
-        {
-            var dispatchCompleted = true;
-            try { await _dispatchTask.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken); }
-            catch (TimeoutException)
-            {
-                dispatchCompleted = false;
-                _logger?.LogWarning("Dispatch worker did not drain within timeout.");
-            }
-            catch (OperationCanceledException) { dispatchCompleted = false; }
-
-            if (dispatchCompleted)
-            {
-                await _dispatchWorker.DrainStoredChunksAsync(cancellationToken);
-            }
-        }
+        _chunkChannel.Writer.TryComplete();
 
         if (_cts is not null)
         {

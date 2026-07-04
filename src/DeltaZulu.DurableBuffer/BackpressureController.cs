@@ -15,8 +15,7 @@ internal sealed class BackpressureController
 
     public (BufferState State, bool ShouldAccept) Evaluate(
         long diskBytesUsed,
-        long memoryBytesUsed,
-        int retryQueueDepth)
+        long memoryBytesUsed)
     {
         if (diskBytesUsed >= _options.MaxDiskBytes || memoryBytesUsed >= _options.MaxMemoryBytes)
         {
@@ -33,11 +32,6 @@ internal sealed class BackpressureController
         if (diskRatio > PressureThreshold || memRatio > PressureThreshold)
         {
             return (BufferState.Pressured, true);
-        }
-
-        if (retryQueueDepth > 0)
-        {
-            return (BufferState.Degraded, true);
         }
 
         return (BufferState.Healthy, true);

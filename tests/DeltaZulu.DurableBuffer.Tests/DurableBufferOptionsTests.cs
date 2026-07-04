@@ -18,30 +18,21 @@ public sealed class DurableBufferOptionsTests
         Assert.AreEqual(4L * 1024 * 1024, options.MaxChunkBytes);
         Assert.AreEqual(TimeSpan.FromSeconds(5), options.MaxChunkAge);
         Assert.AreEqual(BufferFullPolicy.Block, options.FullPolicy);
-        Assert.AreEqual(RetryExhaustedPolicy.DeadLetter, options.RetryExhaustedPolicy);
-        Assert.AreEqual(10, options.MaxRetryAttempts);
-        Assert.AreEqual(TimeSpan.FromSeconds(1), options.RetryBaseDelay);
-        Assert.AreEqual(TimeSpan.FromMinutes(5), options.RetryMaxDelay);
     }
 
     [TestMethod]
     public void CustomValues_ArePreserved()
     {
-        var options = new DurableBufferOptions
-        {
+        var options = new DurableBufferOptions {
             StoragePath = "/data/buffer",
             MaxDiskBytes = 1024L * 1024 * 1024,
             MaxChunkRecords = 500,
-            FullPolicy = BufferFullPolicy.RejectNewest,
-            RetryExhaustedPolicy = RetryExhaustedPolicy.Discard,
-            MaxRetryAttempts = 5
+            FullPolicy = BufferFullPolicy.RejectNewest
         };
 
         Assert.AreEqual("/data/buffer", options.StoragePath);
         Assert.AreEqual(1024L * 1024 * 1024, options.MaxDiskBytes);
         Assert.AreEqual(500, options.MaxChunkRecords);
         Assert.AreEqual(BufferFullPolicy.RejectNewest, options.FullPolicy);
-        Assert.AreEqual(RetryExhaustedPolicy.Discard, options.RetryExhaustedPolicy);
-        Assert.AreEqual(5, options.MaxRetryAttempts);
     }
 }

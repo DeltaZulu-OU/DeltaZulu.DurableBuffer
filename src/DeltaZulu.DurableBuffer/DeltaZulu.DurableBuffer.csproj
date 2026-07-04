@@ -4,11 +4,12 @@
 	<OutputType>Library</OutputType>
 	<PackageId>DeltaZulu.DurableBuffer</PackageId>
 	<Title>DeltaZulu Durable Buffer</Title>
-	<Description>Durable disk-backed buffering, retry, backpressure, recovery, and dead-lettering for .NET.</Description>
+	<Description>Durable disk-backed buffering, backpressure, recovery, and dead-lettering for .NET.</Description>
 	<Authors>DeltaZulu</Authors>
 	<GenerateDocumentationFile>true</GenerateDocumentationFile>
 	<IsPackable>true</IsPackable>
 	<ImplicitUsings>enable</ImplicitUsings>
+	<Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
 	<InternalsVisibleTo Include="DeltaZulu.DurableBuffer.Tests" />

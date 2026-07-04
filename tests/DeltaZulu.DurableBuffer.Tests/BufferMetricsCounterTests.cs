@@ -45,14 +45,15 @@ public sealed class BufferMetricsCounterTests
         var metrics = new BufferMetricsCounter();
         metrics.ChunkCreated();
         metrics.ChunkSealed();
-        metrics.ChunkDelivered();
-        metrics.ChunkDelivered();
-        metrics.ChunkRetried();
+        metrics.ChunkCompleted();
+        metrics.ChunkCompleted();
+        metrics.ChunkReleased();
         metrics.ChunkDeadLettered();
         metrics.ChunkQuarantined();
 
         var snapshot = metrics.ToSnapshot();
-        Assert.AreEqual(2, snapshot.ChunksDeliveredTotal);
+        Assert.AreEqual(2, snapshot.ChunksCompletedTotal);
+        Assert.AreEqual(1, snapshot.ChunksReleasedTotal);
         Assert.AreEqual(1, snapshot.ChunksDeadLetteredTotal);
     }
 
@@ -105,16 +106,6 @@ public sealed class BufferMetricsCounterTests
 
         var snapshot = metrics.ToSnapshot();
         Assert.AreEqual(5, snapshot.SealedChunkCount);
-    }
-
-    [TestMethod]
-    public void UpdateRetryQueueDepth_ReflectedInSnapshot()
-    {
-        var metrics = new BufferMetricsCounter();
-        metrics.UpdateRetryQueueDepth(3);
-
-        var snapshot = metrics.ToSnapshot();
-        Assert.AreEqual(3, snapshot.RetryQueueDepth);
     }
 
     [TestMethod]

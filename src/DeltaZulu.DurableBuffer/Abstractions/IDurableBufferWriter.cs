@@ -1,6 +1,6 @@
 namespace DeltaZulu.DurableBuffer.Abstractions;
 
-public interface IDurableBuffer<T>
+public interface IDurableBufferWriter<T>
 {
     ValueTask<BufferWriteResult> WriteAsync(
         T record,

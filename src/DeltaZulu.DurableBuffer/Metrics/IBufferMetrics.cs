@@ -14,13 +14,9 @@ public interface IBufferMetrics
 
     void ChunkSealed();
 
-    void ChunkSent();
+    void ChunkCompleted();
 
-    void ChunkDelivered();
-
-    void ChunkFailed();
-
-    void ChunkRetried();
+    void ChunkReleased();
 
     void ChunkDeadLettered();
 
@@ -45,8 +41,6 @@ public interface IBufferMetrics
     void UpdateSealedChunkCount(int count);
 
     void UpdateOldestChunkAge(TimeSpan? age);
-
-    void UpdateRetryQueueDepth(int depth);
 
     BufferSnapshot ToSnapshot();
 }

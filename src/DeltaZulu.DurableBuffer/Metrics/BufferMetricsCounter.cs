@@ -9,10 +9,8 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
     private long _recordsDropped;
     private long _chunksCreated;
     private long _chunksSealed;
-    private long _chunksSent;
-    private long _chunksDelivered;
-    private long _chunksFailed;
-    private long _chunksRetried;
+    private long _chunksCompleted;
+    private long _chunksReleased;
     private long _chunksDeadLettered;
     private long _chunksQuarantined;
     private long _chunksDeadLetterEvicted;
@@ -28,7 +26,6 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
     private long _openChunkBytes;
     private int _sealedChunkCount;
     private long _oldestChunkAgeTicks = -1;
-    private int _retryQueueDepth;
 
     public void RecordAccepted() => Interlocked.Increment(ref _recordsAccepted);
 
@@ -40,13 +37,9 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
 
     public void ChunkSealed() => Interlocked.Increment(ref _chunksSealed);
 
-    public void ChunkSent() => Interlocked.Increment(ref _chunksSent);
+    public void ChunkCompleted() => Interlocked.Increment(ref _chunksCompleted);
 
-    public void ChunkDelivered() => Interlocked.Increment(ref _chunksDelivered);
-
-    public void ChunkFailed() => Interlocked.Increment(ref _chunksFailed);
-
-    public void ChunkRetried() => Interlocked.Increment(ref _chunksRetried);
+    public void ChunkReleased() => Interlocked.Increment(ref _chunksReleased);
 
     public void ChunkDeadLettered() => Interlocked.Increment(ref _chunksDeadLettered);
 
@@ -84,8 +77,6 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
 
     public void UpdateOldestChunkAge(TimeSpan? age) => Interlocked.Exchange(ref _oldestChunkAgeTicks, age?.Ticks ?? -1);
 
-    public void UpdateRetryQueueDepth(int depth) => Volatile.Write(ref _retryQueueDepth, depth);
-
     internal long DiskBytesUsed => Interlocked.Read(ref _diskBytesUsed);
 
     internal void AddDiskBytes(long bytes) => Interlocked.Add(ref _diskBytesUsed, bytes);
@@ -104,15 +95,12 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
             MemoryBytesUsed = Interlocked.Read(ref _memoryBytesUsed),
             OpenChunkBytes = Interlocked.Read(ref _openChunkBytes),
             SealedChunkCount = Volatile.Read(ref _sealedChunkCount),
-            RetryQueueDepth = Volatile.Read(ref _retryQueueDepth),
             OldestChunkAge = ageTicks >= 0 ? TimeSpan.FromTicks(ageTicks) : null,
             RecordsAcceptedTotal = Interlocked.Read(ref _recordsAccepted),
             RecordsRejectedTotal = Interlocked.Read(ref _recordsRejected),
             RecordsDroppedTotal = Interlocked.Read(ref _recordsDropped),
-            ChunksSentTotal = Interlocked.Read(ref _chunksSent),
-            ChunksDeliveredTotal = Interlocked.Read(ref _chunksDelivered),
-            ChunksFailedTotal = Interlocked.Read(ref _chunksFailed),
-            ChunksRetryScheduledTotal = Interlocked.Read(ref _chunksRetried),
+            ChunksCompletedTotal = Interlocked.Read(ref _chunksCompleted),
+            ChunksReleasedTotal = Interlocked.Read(ref _chunksReleased),
             ChunksDeadLetteredTotal = Interlocked.Read(ref _chunksDeadLettered),
             DeadLetterBytesUsed = Interlocked.Read(ref _deadLetterBytesUsed),
             DeadLetterBytesLimit = Interlocked.Read(ref _deadLetterBytesLimit),
