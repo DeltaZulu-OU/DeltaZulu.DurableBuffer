@@ -1,33 +1,34 @@
 # DeltaZulu.DurableBuffer Architecture
 
-DeltaZulu.DurableBuffer is a local durable buffering library for .NET 10. It sits between the DeltaZulu collector pipeline and the forwarder, providing crash-safe, disk-backed buffering with backpressure, retry, and dead-lettering.
+DeltaZulu.DurableBuffer is a local durable buffering library for .NET 10. It sits between a producer pipeline and an application-owned forwarding loop, providing crash-safe, disk-backed buffering with backpressure, recovery, consumer-directed retry, and bounded dead-lettering.
 
 ## Design principles
 
-1. **Single-buffer primitive.** The library manages one buffer with one dispatch path. Multi-buffer patterns (hot path + dead-letter overflow) are composed by the consumer instantiating two `DurableBufferHost` instances with different configurations.
-2. **Crash safety over throughput.** Data sealed to disk survives process crashes. The open chunk (in-memory) is lost on crash and quarantined on recovery.
-3. **Format-agnostic payloads.** The binary chunk format stores length-prefixed byte records. The caller provides serialized bytes via `IRecordSerializer<T>`.
-4. **No external dependencies** beyond `Microsoft.Extensions.Logging.Abstractions`.
+1. **Single-buffer primitive.** The library manages one live sealed-chunk queue. Multi-buffer patterns (hot path + dead-letter overflow) are composed by the consumer instantiating multiple `DurableBufferHost` instances with different configurations.
+2. **Crash safety over throughput.** Data sealed to disk survives process crashes. The open in-memory chunk is not durable until rotation; incomplete active files are quarantined on recovery.
+3. **Application-owned dispatch.** The library does not own network forwarding or retry policy. It exposes sealed chunks via `IDurableBufferReader.SealedChunks`, and consumers report success, retry, or dead-letter outcomes.
+4. **Format-agnostic payloads.** The binary chunk format stores length-prefixed byte records. The caller provides serialized bytes via `IRecordSerializer<T>`.
+5. **No external dependencies** beyond `Microsoft.Extensions.Logging.Abstractions`.
 
 ## Components
 
 ```text
 ┌─────────────────────────────────────────────────────────┐
-│                   DurableBufferHost<T>                │
+│                   DurableBufferHost<T>                  │
 │  ┌─────────────────┐  ┌──────────────┐  ┌───────────┐  │
-│  │ DurableBuffer  │  │DispatchWorker│  │ Recovery  │  │
-│  │  (write path)    │  │ (send path)  │  │ Manager   │  │
-│  └────────┬─────────┘  └──────┬───────┘  └─────┬─────┘  │
-│           │                   │                │         │
+│  │ DurableBuffer   │  │DurableBuffer │  │ Recovery  │  │
+│  │  (write path)   │  │Reader        │  │ Manager   │  │
+│  └────────┬────────┘  └──────┬───────┘  └─────┬─────┘  │
+│           │                  │                │         │
 │  ┌────────▼─────────┐  ┌─────▼────────┐       │         │
-│  │  ChunkBuilder    │  │ RetryScheduler│       │         │
-│  │  (in-memory)     │  │ + PriorityQ   │       │         │
+│  │  ChunkBuilder    │  │ Channel<     │       │         │
+│  │  (in-memory)     │  │ StoredChunk> │       │         │
 │  └────────┬─────────┘  └──────────────┘       │         │
 │           │                                    │         │
 │  ┌────────▼────────────────────────────────────▼──────┐  │
 │  │              FileChunkStore (disk I/O)             │  │
-│  │   active/ → sealed/ → dispatching/ → (delete)     │  │
-│  │                 ↘ deadletter/   ↗ quarantine/      │  │
+│  │              active/ → sealed/ → (delete)          │  │
+│  │                    ↘ deadletter/   quarantine/     │  │
 │  └───────────────────────────────────────────────────┘  │
 │                                                         │
 │  ┌───────────────────┐  ┌──────────────────────────┐    │
@@ -38,16 +39,18 @@ DeltaZulu.DurableBuffer is a local durable buffering library for .NET 10. It sit
 
 ## Data flow
 
-1. **Write:** Caller calls `WriteAsync(T)`. The record is serialized and appended to the in-memory `ChunkBuilder`.
-2. **Rotation:** When the chunk reaches record count, byte size, or age limits, it is sealed (binary format with SHA256 checksum) and written atomically to `sealed/`.
-3. **Dispatch:** The `DispatchWorker` reads sealed chunks from a `Channel<StoredChunk>`, moves each to `dispatching/`, and calls `IChunkSender.SendAsync`.
-4. **ACK:** On success, the chunk files are deleted. On transient failure, the chunk moves back to `sealed/` with an incremented attempt count and is enqueued in a `PriorityQueue` for retry.
-5. **Dead-letter:** After retry exhaustion (or on permanent failure), the chunk moves to `deadletter/`.
-6. **Recovery:** On startup, `FileSystemRecoveryManager` quarantines incomplete active files, validates and re-enqueues dispatching/sealed chunks, and quarantines orphans.
+1. **Write:** Caller calls `Writer.WriteAsync(T)`. The record is serialized and appended to the in-memory `ChunkBuilder`.
+2. **Rotation:** When the chunk reaches record count, byte size, or age limits, it is sealed (binary format with SHA-256 checksum) and written atomically to `sealed/`.
+3. **Enqueue:** The sealed `StoredChunk` is published to the internal `Channel<StoredChunk>` and exposed through `Reader.SealedChunks`.
+4. **Consume:** Application code reads chunks from the channel and forwards them to its destination.
+5. **Complete:** On success, the consumer calls `Reader.CompleteAsync(chunk)`, which deletes the chunk files and frees live-buffer disk capacity.
+6. **Retry:** On a retryable failure, the consumer calls `Reader.ReleaseAsync(chunk)`, which re-enqueues the same chunk for another consumer attempt.
+7. **Dead-letter:** On a terminal failure, the consumer calls `Reader.DeadLetterAsync(chunk, reason)`, which moves the chunk into bounded `deadletter/` storage and frees live-buffer disk capacity.
+8. **Recovery:** On startup, `FileSystemRecoveryManager` quarantines incomplete active files, migrates legacy dispatching files, validates and re-enqueues sealed chunks, and quarantines orphans.
 
 ## Binary chunk format
 
-```
+```text
 Offset  Size  Content
 0       4     Magic "DZBC" (0x44 0x5A 0x42 0x43)
 4       4     Format version (1)
@@ -69,68 +72,71 @@ Header size: 48 bytes. Footer size: 40 bytes.
 
 | State | Condition | Accept writes? |
 |---|---|---|
-| Healthy | Under limits, no retries pending | Yes |
-| Degraded | Under limits, retry queue non-empty | Yes |
-| Pressured | Disk or memory usage > 85% of limit | Yes |
-| Full | Disk or memory at/over limit | No (policy-dependent) |
+| Healthy | Live sealed disk usage and open-chunk memory are under pressure thresholds | Yes |
+| Pressured | Live disk or memory usage is over 85% of its limit | Yes |
+| Full | Live disk or memory usage is at or over its limit | No (policy-dependent) |
 
 When full, the configured `BufferFullPolicy` determines behavior:
-- **Block:** Waits on a semaphore until space is freed.
+
+- **Block:** Waits until a consumer completes or dead-letters chunks and signals that live-buffer space is available.
 - **RejectNewest:** Returns `RejectedBufferFull` immediately.
 - **DropOldest:** Deletes the oldest sealed chunk to make room.
 
-## Retry strategy
+Dead-letter and quarantine files do not count against `MaxDiskBytes`; they have independent ring-buffer caps (`MaxDeadLetterBytes` and `MaxQuarantineBytes`).
 
-Exponential backoff with ±25% jitter:
+## Consumer retry strategy
 
-```
-delay = min(maxDelay, baseDelay × 2^attempt) × (1 ± 0.25)
-```
+Retry policy is intentionally owned by the consumer. The buffer only provides primitives:
 
-Default: base 1s, max 5min, 10 attempts. After exhaustion, the `RetryExhaustedPolicy` applies: `DeadLetter` (default) or `Discard`.
+- `ReleaseAsync` immediately makes the chunk available on `SealedChunks` again.
+- Consumers that need backoff can delay before calling `ReleaseAsync`, or maintain their own scheduler and call `ReleaseAsync` when the chunk should be retried.
+- Consumers that exhaust their retry budget should call `DeadLetterAsync` with a reason for observability.
 
 ## File state transitions
 
-```
+```text
 active/*.tmp  →  (quarantined on recovery)
-sealed/*.chunk + *.meta.json  →  dispatching/  →  (deleted on success)
-                                              →  sealed/ (on transient failure, retry)
-                                              →  deadletter/ (on permanent failure or retry exhaustion)
+sealed/*.chunk + *.meta.json  →  (deleted on CompleteAsync)
+                              →  sealed/ (ReleaseAsync re-enqueues the existing files)
+                              →  deadletter/ (DeadLetterAsync)
+legacy dispatching/*          →  sealed/ (constructor migration)
+invalid or orphaned files     →  quarantine/
 ```
 
-All state transitions use atomic `File.Move`. Temp files use `.tmp` suffix and are renamed on completion.
+Sealed chunks are written via temp files and renamed into place on completion. Dead-letter and quarantine storage are bounded; when a cap is exceeded, the oldest entries are evicted and eviction events are published.
 
 ## Security
 
-- Symlink protection on all file operations (`EnsureNotSymlink`).
+- Symlink protection on file operations (`EnsureNotSymlink`).
 - Unix file mode hardening (owner-only rwx) on non-Windows.
-- Atomic writes via temp file + rename.
+- Atomic chunk writes via temp file + rename.
 
 ## Concurrency model
 
 - `SemaphoreSlim(1,1)` serializes write operations on `ChunkBuilder`.
-- `System.Threading.Channels` (bounded, single-reader) connects the write path to the dispatch worker.
+- `System.Threading.Channels` connects the write path to application consumers.
+- The sealed chunk channel is bounded and supports multiple readers and writers.
 - All metrics counters use `Interlocked` operations.
 - Event broadcasting uses `ImmutableArray<T>` with `ImmutableInterlocked.InterlockedCompareExchange`.
-- `PeriodicTimer` checks for stale chunks every 500ms.
+- `PeriodicTimer` checks for stale chunks every 500 ms.
 
 ## Consumer composition: two-buffer pattern
 
-The library stays a single-buffer primitive. To implement a dead-letter overflow buffer:
+The library stays a single-buffer primitive. To implement a dead-letter overflow buffer, subscribe to dead-letter events or consume files from `deadletter/` and write records to a second host:
 
 ```csharp
-var bufferA = new DurableBufferHost<T>(optionsA, serializer, primarySender);
-var bufferB = new DurableBufferHost<T>(optionsB, serializer, fallbackSender);
+var bufferA = new DurableBufferHost<T>(optionsA, serializer);
+var bufferB = new DurableBufferHost<T>(optionsB, serializer);
 
 bufferA.Events
-    .Where(e => e.EventType == BufferEventType.BufferChunkDeadLettered)
+    .Where(e => e.EventType == BufferEventType.BufferChunkDeadLettered && e.Chunk is not null)
     .Subscribe(async evt =>
     {
         var data = await File.ReadAllBytesAsync(evt.Chunk!.ChunkFilePath);
         var records = ChunkFormat.ReadRecords(data);
         foreach (var record in records)
-            await bufferB.Buffer.WriteAsync(deserialize(record));
+            await bufferB.Writer.WriteAsync(deserialize(record));
     });
 ```
 
-Each host has independent storage, retry configuration, and sender.
+Each host has independent storage, backpressure configuration, dead-letter capacity, quarantine capacity, and consumer logic.
