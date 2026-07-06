@@ -12,6 +12,7 @@ The library is intentionally small: it has no runtime dependencies beyond `Micro
 - **Consumer-directed retry and dead-lettering**: consumers can release chunks back to the sealed queue for retry or move failed chunks into bounded dead-letter storage.
 - **Startup recovery**: valid sealed chunks are re-enqueued, incomplete active files are quarantined, legacy `dispatching/` files are migrated back to `sealed/`, and orphaned files are quarantined.
 - **Metrics and events**: query `BufferSnapshot` and subscribe to `BufferEvent` notifications, including dead-letter and quarantine eviction events.
+- **Reactive contracts without framework dependency**: `DeltaZulu.DurableBuffer.Rx` provides demand-aware publisher/subscriber and event-stream interfaces without requiring Rx.NET/R3/Dataflow.
 - **Format-agnostic records**: provide any `IRecordSerializer<T>` implementation; a JSON serializer is included.
 
 ## Requirements
@@ -115,6 +116,9 @@ await consumerTask;
 - `Writer`: exposes `IDurableBufferWriter<T>` for writes, flushes, and snapshots.
 - `Reader`: exposes `IDurableBufferReader` for consuming sealed chunks and reporting outcomes.
 - `Events`: exposes an `IObservable<BufferEvent>` stream.
+- `RxEvents`: exposes an `IRxEventStream<BufferEvent>` stream.
+- `RxChunks`: exposes an `IRxPublisher<StoredChunk>` for demand-aware chunk dispatch.
+- `RxChunkDiagnostics`: exposes active `.Rx` subscription and dispatch snapshots.
 
 ### `IDurableBufferWriter<T>`
 
@@ -130,6 +134,17 @@ Use the reader from your own forwarding loop:
 - `CompleteAsync(StoredChunk, ...)`: deletes a successfully processed chunk and frees live-buffer disk capacity.
 - `ReleaseAsync(StoredChunk, ...)`: re-enqueues a chunk for application-managed retry.
 - `DeadLetterAsync(StoredChunk, reason, ...)`: moves a failed chunk to bounded dead-letter storage and frees live-buffer disk capacity.
+
+### `.Rx` contracts
+
+`DeltaZulu.DurableBuffer.Rx` contains a small DeltaZulu-owned contract surface:
+
+- `IRxPublisher<T>`, `IRxSubscriber<T>`, `IRxSubscription`, `IRxProcessor<TIn,TOut>`
+- `IRxEventStream<TEvent>`, `IRxEventSink<TEvent>`
+- `RxCompletion` for success/failure completion signals
+- Interop adapters to/from `IObservable<T>` and `IAsyncEnumerable<T>`
+
+The core implementation still uses a bounded channel internally for chunk handoff.
 
 ### Serialization
 

@@ -4,6 +4,7 @@ using DeltaZulu.DurableBuffer.Chunks;
 using DeltaZulu.DurableBuffer.Configuration;
 using DeltaZulu.DurableBuffer.Metrics;
 using DeltaZulu.DurableBuffer.Recovery;
+using DeltaZulu.DurableBuffer.Rx;
 using DeltaZulu.DurableBuffer.Storage;
 using Microsoft.Extensions.Logging;
 
@@ -20,6 +21,7 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
     private readonly Channel<StoredChunk> _chunkChannel;
     private readonly DurableBufferOptions _options;
     private readonly ILogger? _logger;
+    private readonly RxChunkPublisher _rxChunkPublisher;
 
     private Task? _rotationTask;
     private CancellationTokenSource? _cts;
@@ -75,6 +77,7 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
             _chunkChannel.Reader, _chunkChannel.Writer,
             _store, _metrics, _eventBroadcaster,
             _buffer.SignalSpaceAvailable);
+        _rxChunkPublisher = new RxChunkPublisher(_chunkChannel.Reader, _eventBroadcaster);
 
         _recoveryManager = new FileSystemRecoveryManager(
             _store, _chunkChannel.Writer, _metrics,
@@ -85,6 +88,9 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
     public IDurableBufferWriter<T> Writer => _buffer;
     public IDurableBufferReader Reader => _reader;
     public IObservable<BufferEvent> Events => _eventBroadcaster;
+    public IRxEventStream<BufferEvent> RxEvents => _eventBroadcaster;
+    public IRxPublisher<StoredChunk> RxChunks => _rxChunkPublisher;
+    public IRxDispatchDiagnostics<StoredChunk> RxChunkDiagnostics => _rxChunkPublisher;
 
     public async ValueTask StartAsync(CancellationToken cancellationToken = default)
     {
@@ -164,6 +170,7 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         }
 
         _eventBroadcaster.Complete();
+        _rxChunkPublisher.Dispose();
         _buffer.Dispose();
         _cts?.Dispose();
         _disposed = true;

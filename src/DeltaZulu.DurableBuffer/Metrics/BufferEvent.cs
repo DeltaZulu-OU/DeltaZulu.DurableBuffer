@@ -20,7 +20,13 @@ public enum BufferEventType
     BufferRecoveryCompleted,
     BufferFileQuarantined,
     BufferDeadLetterEvicted,
-    BufferQuarantineEvicted
+    BufferQuarantineEvicted,
+    BufferRxSubscriptionStarted,
+    BufferRxSubscriptionCancelled,
+    BufferRxSubscriptionCompleted,
+    BufferRxChunkDelivered,
+    BufferRxChunkSubscriberFault,
+    BufferRxEventDropped
 }
 
 public sealed record BufferEvent

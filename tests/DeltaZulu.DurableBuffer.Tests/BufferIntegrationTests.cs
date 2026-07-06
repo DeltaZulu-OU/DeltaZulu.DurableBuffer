@@ -148,6 +148,12 @@ public sealed class BufferIntegrationTests
         await host.StartAsync(TestContext.CancellationToken);
         await host.StopAsync(TestContext.CancellationToken);
 
+        Assert.IsTrue(SpinWait.SpinUntil(
+            () => events.Any(e => e.EventType == BufferEventType.BufferStarted),
+            TimeSpan.FromSeconds(2)));
+        Assert.IsTrue(SpinWait.SpinUntil(
+            () => events.Any(e => e.EventType == BufferEventType.BufferStopped),
+            TimeSpan.FromSeconds(2)));
         Assert.Contains(e => e.EventType == BufferEventType.BufferStarted, events);
         Assert.Contains(e => e.EventType == BufferEventType.BufferStopped, events);
     }
@@ -192,6 +198,9 @@ public sealed class BufferIntegrationTests
         await host.StopAsync(TestContext.CancellationToken);
         await consumerTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.CancellationToken);
 
+        Assert.IsTrue(SpinWait.SpinUntil(
+            () => events.Any(e => e.EventType == BufferEventType.BufferChunkDeadLettered),
+            TimeSpan.FromSeconds(2)));
         Assert.Contains(e => e.EventType == BufferEventType.BufferChunkDeadLettered, events);
         var deadLetterDir = Path.Combine(_storagePath, "deadletter");
         Assert.IsTrue(Directory.Exists(deadLetterDir));

@@ -115,10 +115,30 @@ Sealed chunks are written via temp files and renamed into place on completion. D
 
 - `SemaphoreSlim(1,1)` serializes write operations on `ChunkBuilder`.
 - `System.Threading.Channels` connects the write path to application consumers.
+- `DeltaZulu.DurableBuffer.Rx` exposes durable-buffer-owned reactive contracts for demand-aware chunk dispatch and lifecycle-safe event streams.
 - The sealed chunk channel is bounded and supports multiple readers and writers.
 - All metrics counters use `Interlocked` operations.
 - Event broadcasting uses `ImmutableArray<T>` with `ImmutableInterlocked.InterlockedCompareExchange`.
 - `PeriodicTimer` checks for stale chunks every 500 ms.
+
+## Primitive responsibility map
+
+| Boundary | Primitive | Reason |
+|---|---|---|
+| Durable chunk state | Buffer/file-store state under controlled mutation | Authoritative transitions remain deterministic. |
+| Chunk dispatch implementation | `Channel<StoredChunk>` | Bounded async producer/consumer handoff. |
+| Chunk dispatch contract | `DeltaZulu.DurableBuffer.Rx` (`IRxPublisher<T>`, `IRxSubscriber<T>`, `IRxSubscription`) | Exposes demand, cancellation, and completion without leaking channel internals. |
+| Buffer events contract | `DeltaZulu.DurableBuffer.Rx` (`IRxEventStream<TEvent>`, `IRxEventSink<TEvent>`) | Stable observability contracts without external reactive dependencies. |
+| Byte stream parsing | `PipeReader` / `PipeWriter` (at transport boundaries) | Handles partial frames and pooled buffer parsing efficiently. |
+| Background work | Explicit `Task` loops | Clear lifecycle and cancellation behavior. |
+
+## Reactive non-goals
+
+- No Rx.NET dependency in DurableBuffer core.
+- No R3 dependency in DurableBuffer core.
+- No Reactive Streams compliance claim.
+- No full operator/scheduler framework in core.
+- No unbounded channels for durable chunk dispatch.
 
 ## Consumer composition: two-buffer pattern
 

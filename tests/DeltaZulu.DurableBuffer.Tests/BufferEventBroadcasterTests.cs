@@ -25,6 +25,7 @@ public sealed class BufferEventBroadcasterTests
 
         broadcaster.Publish(BufferEvent.Create(BufferEventType.BufferStarted));
 
+        WaitFor(() => observer.Events.Count == 1);
         Assert.HasCount(1, observer.Events);
         Assert.AreEqual(BufferEventType.BufferStarted, observer.Events[0].EventType);
     }
@@ -40,6 +41,7 @@ public sealed class BufferEventBroadcasterTests
 
         broadcaster.Publish(BufferEvent.Create(BufferEventType.BufferStopped));
 
+        WaitFor(() => obs1.Events.Count == 1 && obs2.Events.Count == 1);
         Assert.HasCount(1, obs1.Events);
         Assert.HasCount(1, obs2.Events);
     }
@@ -52,9 +54,11 @@ public sealed class BufferEventBroadcasterTests
         var subscription = broadcaster.Subscribe(observer);
 
         broadcaster.Publish(BufferEvent.Create(BufferEventType.BufferStarted));
+        WaitFor(() => observer.Events.Count == 1);
         subscription.Dispose();
         broadcaster.Publish(BufferEvent.Create(BufferEventType.BufferStopped));
 
+        Thread.Sleep(100);
         Assert.HasCount(1, observer.Events);
     }
 
@@ -69,6 +73,7 @@ public sealed class BufferEventBroadcasterTests
 
         broadcaster.Complete();
 
+        WaitFor(() => obs1.Completed && obs2.Completed);
         Assert.IsTrue(obs1.Completed);
         Assert.IsTrue(obs2.Completed);
     }
@@ -84,7 +89,13 @@ public sealed class BufferEventBroadcasterTests
 
         broadcaster.Publish(BufferEvent.Create(BufferEventType.BufferStarted));
 
+        WaitFor(() => goodObserver.Events.Count == 1);
         Assert.HasCount(1, goodObserver.Events);
+    }
+
+    private static void WaitFor(Func<bool> predicate)
+    {
+        Assert.IsTrue(SpinWait.SpinUntil(predicate, TimeSpan.FromSeconds(2)));
     }
 
     private sealed class FaultyObserver : IObserver<BufferEvent>
