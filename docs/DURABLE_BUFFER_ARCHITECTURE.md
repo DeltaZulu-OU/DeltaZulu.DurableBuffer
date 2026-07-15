@@ -139,6 +139,22 @@ Sealed chunks are written via temp files and renamed into place on completion. D
 - No Reactive Streams compliance claim.
 - No full operator/scheduler framework in core.
 - No unbounded channels for durable chunk dispatch.
+- No broadcast pub-sub semantics for durable chunk delivery. `RxChunks` is demand-aware queue dispatch over the sealed-chunk queue: a delivered chunk is read from the queue for one consumer attempt, not replayed to every active subscriber.
+
+## Durable pub-sub wrapper acceptance criteria
+
+DurableBuffer remains a single-buffer queue primitive. A separate DurablePubSub wrapper may compose one or more DurableBuffer instances to provide broadcast-style pub-sub behavior, but that wrapper must satisfy these acceptance criteria rather than relying on DurableBuffer chunk dispatch to provide them:
+
+- DurableBuffer docs explicitly say Rx chunk delivery is queue dispatch, not broadcast pub-sub.
+- DurablePubSub has named durable subscribers.
+- Publish generates a stable `eventId` or `publishId` before subscriber writes.
+- Required subscriber buffers must accept before `Publish` succeeds.
+- Optional subscriber failure never blocks required subscriber delivery.
+- Each subscriber has independent buffer storage, ACK, retry, DLQ, and metrics.
+- Cross-branch correlation uses `eventId` or `publishId`, not branch-local `chunkId`.
+- Integration tests cover partial publish failure.
+- Integration tests cover restart after some subscriber writes succeeded.
+- Metrics distinguish required publish failure from optional sample drop.
 
 ## Consumer composition: two-buffer pattern
 
