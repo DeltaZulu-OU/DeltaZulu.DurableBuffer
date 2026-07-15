@@ -73,7 +73,12 @@ public sealed class RxIntegrationTests
         await subscription.RequestAsync(1, TestContext.CancellationToken);
         await subscriber.SecondReceived.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.CancellationToken);
 
-        var snapshots = host.RxChunkDiagnostics.GetSubscriptionSnapshots();
+        IReadOnlyList<RxSubscriptionSnapshot> snapshots = [];
+        Assert.IsTrue(SpinWait.SpinUntil(() =>
+        {
+            snapshots = host.RxChunkDiagnostics.GetSubscriptionSnapshots();
+            return snapshots.Count == 1 && snapshots[0].DeliveredTotal >= 2;
+        }, TimeSpan.FromSeconds(2)));
         Assert.AreEqual(1, snapshots.Count);
         Assert.IsGreaterThanOrEqualTo(2, snapshots[0].DeliveredTotal);
 
