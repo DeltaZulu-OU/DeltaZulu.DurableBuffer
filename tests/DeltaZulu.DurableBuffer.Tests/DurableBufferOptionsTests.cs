@@ -17,6 +17,8 @@ public sealed class DurableBufferOptionsTests
         Assert.AreEqual(1000, options.MaxChunkRecords);
         Assert.AreEqual(4L * 1024 * 1024, options.MaxChunkBytes);
         Assert.AreEqual(TimeSpan.FromSeconds(5), options.MaxChunkAge);
+        Assert.AreEqual(1024, options.DispatchChannelCapacity);
+        Assert.AreEqual(256, options.MaxInFlightChunks);
         Assert.AreEqual(BufferFullPolicy.Block, options.FullPolicy);
     }
 
@@ -27,12 +29,16 @@ public sealed class DurableBufferOptionsTests
             StoragePath = "/data/buffer",
             MaxDiskBytes = 1024L * 1024 * 1024,
             MaxChunkRecords = 500,
+            DispatchChannelCapacity = 32,
+            MaxInFlightChunks = 8,
             FullPolicy = BufferFullPolicy.RejectNewest
         };
 
         Assert.AreEqual("/data/buffer", options.StoragePath);
         Assert.AreEqual(1024L * 1024 * 1024, options.MaxDiskBytes);
         Assert.AreEqual(500, options.MaxChunkRecords);
+        Assert.AreEqual(32, options.DispatchChannelCapacity);
+        Assert.AreEqual(8, options.MaxInFlightChunks);
         Assert.AreEqual(BufferFullPolicy.RejectNewest, options.FullPolicy);
     }
 }

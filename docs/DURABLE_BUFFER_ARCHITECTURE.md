@@ -41,12 +41,13 @@ DeltaZulu.DurableBuffer is a local durable buffering library for .NET 10. It sit
 
 1. **Write:** Caller calls `Writer.WriteAsync(T)`. The record is serialized and appended to the in-memory `ChunkBuilder`.
 2. **Rotation:** When the chunk reaches record count, byte size, or age limits, it is sealed (binary format with SHA-256 checksum) and written atomically to `sealed/`.
-3. **Enqueue:** The sealed `StoredChunk` is published to the internal `Channel<StoredChunk>` and exposed through `Reader.SealedChunks`.
-4. **Consume:** Application code reads chunks from the channel and forwards them to its destination.
-5. **Complete:** On success, the consumer calls `Reader.CompleteAsync(chunk)`, which deletes the chunk files and frees live-buffer disk capacity.
-6. **Retry:** On a retryable failure, the consumer calls `Reader.ReleaseAsync(chunk)`, which re-enqueues the same chunk for another consumer attempt.
-7. **Dead-letter:** On a terminal failure, the consumer calls `Reader.DeadLetterAsync(chunk, reason)`, which moves the chunk into bounded `deadletter/` storage and frees live-buffer disk capacity.
-8. **Recovery:** On startup, `FileSystemRecoveryManager` quarantines incomplete active files, migrates legacy dispatching files, validates and re-enqueues sealed chunks, and quarantines orphans.
+3. **Catalog transition:** The sealed `StoredChunk` is added to the authoritative runtime chunk catalog.
+4. **Dispatch:** A dedicated dispatcher worker moves available catalog chunks into the bounded internal `Channel<StoredChunk>` and exposes them through `Reader.SealedChunks`.
+5. **Consume:** Application code reads chunks from the channel and forwards them to its destination.
+6. **Complete:** On success, the consumer calls `Reader.CompleteAsync(chunk)`, which deletes the chunk files, marks catalog terminal state, and frees live-buffer disk capacity.
+7. **Retry:** On a retryable failure, the consumer calls `Reader.ReleaseAsync(chunk)`, which transitions catalog state back to available.
+8. **Dead-letter:** On a terminal failure, the consumer calls `Reader.DeadLetterAsync(chunk, reason)`, which moves the chunk into bounded `deadletter/` storage, marks catalog terminal state, and frees live-buffer disk capacity.
+9. **Recovery:** On startup, `FileSystemRecoveryManager` quarantines incomplete active files, migrates legacy dispatching files, validates chunks, rebuilds catalog availability, and quarantines orphans.
 
 ## Binary chunk format
 
@@ -114,25 +115,28 @@ Sealed chunks are written via temp files and renamed into place on completion. D
 ## Concurrency model
 
 - `SemaphoreSlim(1,1)` serializes write operations on `ChunkBuilder`.
-- `System.Threading.Channels` connects the write path to application consumers.
-- `DeltaZulu.DurableBuffer.Rx` exposes durable-buffer-owned reactive contracts for demand-aware chunk dispatch and lifecycle-safe event streams.
-- The sealed chunk channel is bounded and supports multiple readers and writers.
+- `System.Threading.Channels` is bounded dispatch plumbing from catalog to application consumers.
+- `DeltaZulu.DurableBuffer.Rx` is a durable-buffer-owned reactive interface facade for user convenience; it adapts queue dispatch and lifecycle event streams without adding broker, topic, or fan-out semantics.
+- The sealed chunk channel is bounded, single-writer (dispatcher) and multi-reader.
 - All metrics counters use `Interlocked` operations.
 - Event broadcasting uses `ImmutableArray<T>` with `ImmutableInterlocked.InterlockedCompareExchange`.
 - `PeriodicTimer` checks for stale chunks every 500 ms.
+- Dedicated dispatcher and rotation worker tasks are lifecycle-managed by `DurableBufferHost<T>`.
 
 ## Primitive responsibility map
 
 | Boundary | Primitive | Reason |
 |---|---|---|
-| Durable chunk state | Buffer/file-store state under controlled mutation | Authoritative transitions remain deterministic. |
+| Durable chunk state | Chunk catalog + file-store state under controlled mutation | Authoritative transitions remain deterministic. |
 | Chunk dispatch implementation | `Channel<StoredChunk>` | Bounded async producer/consumer handoff. |
-| Chunk dispatch contract | `DeltaZulu.DurableBuffer.Rx` (`IRxPublisher<T>`, `IRxSubscriber<T>`, `IRxSubscription`) | Exposes demand, cancellation, and completion without leaking channel internals. |
-| Buffer events contract | `DeltaZulu.DurableBuffer.Rx` (`IRxEventStream<TEvent>`, `IRxEventSink<TEvent>`) | Stable observability contracts without external reactive dependencies. |
+| Chunk dispatch facade | `DeltaZulu.DurableBuffer.Rx` (`IRxPublisher<T>`, `IRxSubscriber<T>`, `IRxSubscription`) | Convenience facade that exposes demand, cancellation, and completion over the same queue dispatch without leaking channel internals. |
+| Buffer events facade | `DeltaZulu.DurableBuffer.Rx` (`IRxEventStream<TEvent>`, `IRxEventSink<TEvent>`) | Convenience facade for lifecycle observability without external reactive dependencies. |
 | Byte stream parsing | `PipeReader` / `PipeWriter` (at transport boundaries) | Handles partial frames and pooled buffer parsing efficiently. |
 | Background work | Explicit `Task` loops | Clear lifecycle and cancellation behavior. |
 
-## Reactive non-goals
+## Reactive facade and non-goals
+
+`DeltaZulu.DurableBuffer.Rx` is only an interface facade over DurableBuffer primitives. It is provided for user convenience when a callback/request-shaped API is preferable to direct `ChannelReader<StoredChunk>` or `IObservable<BufferEvent>` usage. The facade must preserve single-buffer queue semantics.
 
 - No Rx.NET dependency in DurableBuffer core.
 - No R3 dependency in DurableBuffer core.
@@ -140,6 +144,7 @@ Sealed chunks are written via temp files and renamed into place on completion. D
 - No full operator/scheduler framework in core.
 - No unbounded channels for durable chunk dispatch.
 - No broadcast pub-sub semantics for durable chunk delivery. `RxChunks` is demand-aware queue dispatch over the sealed-chunk queue: a delivered chunk is read from the queue for one consumer attempt, not replayed to every active subscriber.
+- No per-subscriber durable state in the Rx facade; durable subscriber state belongs in the DurablePubSub wrapper.
 
 ## Durable pub-sub wrapper acceptance criteria
 

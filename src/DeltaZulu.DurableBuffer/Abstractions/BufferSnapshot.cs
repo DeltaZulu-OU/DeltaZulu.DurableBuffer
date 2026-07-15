@@ -23,4 +23,12 @@ public sealed record BufferSnapshot
     public required long QuarantineBytesLimit { get; init; }
     public required long ChunksDeadLetterEvictedTotal { get; init; }
     public required long ChunksQuarantineEvictedTotal { get; init; }
+    public required int DispatchQueueCapacity { get; init; }
+    public required int DispatchQueueDepth { get; init; }
+    public required int MaxInFlightChunks { get; init; }
+    public required int InFlightChunks { get; init; }
+    public required int AvailableChunks { get; init; }
+    public required TimeSpan? OldestAvailableChunkAge { get; init; }
+    public required TimeSpan? OldestDispatchedChunkAge { get; init; }
+    public required DispatchWaitReason DispatcherWaitReason { get; init; }
 }

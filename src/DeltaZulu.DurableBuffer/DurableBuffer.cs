@@ -1,4 +1,3 @@
-using System.Threading.Channels;
 using DeltaZulu.DurableBuffer.Abstractions;
 using DeltaZulu.DurableBuffer.Chunks;
 using DeltaZulu.DurableBuffer.Configuration;
@@ -15,7 +14,8 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
     private readonly BufferMetricsCounter _metrics;
     private readonly BufferEventBroadcaster _events;
     private readonly BackpressureController _backpressure;
-    private readonly ChannelWriter<StoredChunk> _chunkWriter;
+    private readonly Func<StoredChunk, CancellationToken, ValueTask> _onChunkSealed;
+    private readonly Func<CancellationToken, ValueTask<bool>> _tryDropOldestChunk;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ChunkBuilder _chunkBuilder;
     private volatile bool _stopping;
@@ -28,7 +28,8 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
         BufferMetricsCounter metrics,
         BufferEventBroadcaster events,
         BackpressureController backpressure,
-        ChannelWriter<StoredChunk> chunkWriter)
+        Func<StoredChunk, CancellationToken, ValueTask> onChunkSealed,
+        Func<CancellationToken, ValueTask<bool>> tryDropOldestChunk)
     {
         _serializer = serializer;
         _store = store;
@@ -36,7 +37,8 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
         _metrics = metrics;
         _events = events;
         _backpressure = backpressure;
-        _chunkWriter = chunkWriter;
+        _onChunkSealed = onChunkSealed;
+        _tryDropOldestChunk = tryDropOldestChunk;
         _chunkBuilder = new ChunkBuilder(options);
 
         _metrics.UpdateDiskUsage(0, options.MaxDiskBytes);
@@ -169,7 +171,7 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
         _events.Publish(BufferEvent.Create(
             BufferEventType.BufferChunkSealed, storedChunk.Id.Value, chunk: storedChunk));
 
-        await _chunkWriter.WriteAsync(storedChunk, cancellationToken);
+        await _onChunkSealed(storedChunk, cancellationToken);
 
         _chunkBuilder.Reset();
         _metrics.ChunkCreated();
@@ -228,7 +230,7 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
                     await _writeLock.WaitAsync(cancellationToken);
                     try
                     {
-                        var dropped = await DropOldestChunkAsync(cancellationToken);
+                        var dropped = await _tryDropOldestChunk(cancellationToken);
                         if (!dropped)
                         {
                             _metrics.RecordRejected();
@@ -248,23 +250,6 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
                     return new BufferWriteResult(BufferWriteStatus.RejectedBufferFull);
             }
         }
-    }
-
-    private async ValueTask<bool> DropOldestChunkAsync(CancellationToken cancellationToken)
-    {
-        var chunks = await _store.GetSealedChunksAsync(cancellationToken);
-        if (chunks.Count == 0)
-        {
-            return false;
-        }
-
-        var oldest = chunks.OrderBy(c => c.Metadata.CreatedUtc).First();
-        await _store.DeleteAsync(oldest, cancellationToken);
-        _metrics.AddDiskBytes(-oldest.Metadata.PayloadBytes);
-        _events.Publish(BufferEvent.Create(
-            BufferEventType.BufferChunkDropped, oldest.Id.Value,
-            detail: "Dropped oldest to free space", chunk: oldest));
-        return true;
     }
 
     private int _lastState;

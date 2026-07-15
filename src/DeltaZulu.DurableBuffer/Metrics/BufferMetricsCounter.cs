@@ -26,6 +26,14 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
     private long _openChunkBytes;
     private int _sealedChunkCount;
     private long _oldestChunkAgeTicks = -1;
+    private int _dispatchQueueCapacity;
+    private int _dispatchQueueDepth;
+    private int _maxInFlightChunks;
+    private int _inFlightChunks;
+    private int _availableChunks;
+    private long _oldestAvailableChunkAgeTicks = -1;
+    private long _oldestDispatchedChunkAgeTicks = -1;
+    private int _dispatcherWaitReason;
 
     public void RecordAccepted() => Interlocked.Increment(ref _recordsAccepted);
 
@@ -77,6 +85,22 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
 
     public void UpdateOldestChunkAge(TimeSpan? age) => Interlocked.Exchange(ref _oldestChunkAgeTicks, age?.Ticks ?? -1);
 
+    public void UpdateDispatchQueueCapacity(int capacity) => Volatile.Write(ref _dispatchQueueCapacity, capacity);
+
+    public void UpdateDispatchQueueDepth(int depth) => Volatile.Write(ref _dispatchQueueDepth, depth);
+
+    public void UpdateMaxInFlightChunks(int maxInFlight) => Volatile.Write(ref _maxInFlightChunks, maxInFlight);
+
+    public void UpdateInFlightChunks(int inFlight) => Volatile.Write(ref _inFlightChunks, inFlight);
+
+    public void UpdateAvailableChunks(int available) => Volatile.Write(ref _availableChunks, available);
+
+    public void UpdateOldestAvailableChunkAge(TimeSpan? age) => Interlocked.Exchange(ref _oldestAvailableChunkAgeTicks, age?.Ticks ?? -1);
+
+    public void UpdateOldestDispatchedChunkAge(TimeSpan? age) => Interlocked.Exchange(ref _oldestDispatchedChunkAgeTicks, age?.Ticks ?? -1);
+
+    public void UpdateDispatcherWaitReason(DispatchWaitReason reason) => Volatile.Write(ref _dispatcherWaitReason, (int)reason);
+
     internal long DiskBytesUsed => Interlocked.Read(ref _diskBytesUsed);
 
     internal void AddDiskBytes(long bytes) => Interlocked.Add(ref _diskBytesUsed, bytes);
@@ -88,6 +112,8 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
     public BufferSnapshot ToSnapshot()
     {
         var ageTicks = Interlocked.Read(ref _oldestChunkAgeTicks);
+        var oldestAvailableTicks = Interlocked.Read(ref _oldestAvailableChunkAgeTicks);
+        var oldestDispatchedTicks = Interlocked.Read(ref _oldestDispatchedChunkAgeTicks);
         return new BufferSnapshot {
             State = (BufferState)Volatile.Read(ref _state),
             DiskBytesUsed = Interlocked.Read(ref _diskBytesUsed),
@@ -107,7 +133,15 @@ internal sealed class BufferMetricsCounter : IBufferMetrics
             QuarantineBytesUsed = Interlocked.Read(ref _quarantineBytesUsed),
             QuarantineBytesLimit = Interlocked.Read(ref _quarantineBytesLimit),
             ChunksDeadLetterEvictedTotal = Interlocked.Read(ref _chunksDeadLetterEvicted),
-            ChunksQuarantineEvictedTotal = Interlocked.Read(ref _chunksQuarantineEvicted)
+            ChunksQuarantineEvictedTotal = Interlocked.Read(ref _chunksQuarantineEvicted),
+            DispatchQueueCapacity = Volatile.Read(ref _dispatchQueueCapacity),
+            DispatchQueueDepth = Volatile.Read(ref _dispatchQueueDepth),
+            MaxInFlightChunks = Volatile.Read(ref _maxInFlightChunks),
+            InFlightChunks = Volatile.Read(ref _inFlightChunks),
+            AvailableChunks = Volatile.Read(ref _availableChunks),
+            OldestAvailableChunkAge = oldestAvailableTicks >= 0 ? TimeSpan.FromTicks(oldestAvailableTicks) : null,
+            OldestDispatchedChunkAge = oldestDispatchedTicks >= 0 ? TimeSpan.FromTicks(oldestDispatchedTicks) : null,
+            DispatcherWaitReason = (DispatchWaitReason)Volatile.Read(ref _dispatcherWaitReason)
         };
     }
 }

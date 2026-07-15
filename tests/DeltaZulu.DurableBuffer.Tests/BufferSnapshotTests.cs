@@ -28,7 +28,15 @@ public sealed class BufferSnapshotTests
             QuarantineBytesUsed = 0,
             QuarantineBytesLimit = 64L * 1024 * 1024,
             ChunksDeadLetterEvictedTotal = 0,
-            ChunksQuarantineEvictedTotal = 0
+            ChunksQuarantineEvictedTotal = 0,
+            DispatchQueueCapacity = 1024,
+            DispatchQueueDepth = 1,
+            MaxInFlightChunks = 256,
+            InFlightChunks = 1,
+            AvailableChunks = 2,
+            OldestAvailableChunkAge = TimeSpan.FromSeconds(20),
+            OldestDispatchedChunkAge = TimeSpan.FromSeconds(10),
+            DispatcherWaitReason = DispatchWaitReason.None
         };
 
         Assert.AreEqual(BufferState.Pressured, snapshot.State);

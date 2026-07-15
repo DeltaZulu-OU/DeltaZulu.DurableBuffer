@@ -1,5 +1,4 @@
 using System.Text;
-using System.Threading.Channels;
 using DeltaZulu.DurableBuffer.Abstractions;
 using DeltaZulu.DurableBuffer.Chunks;
 using DeltaZulu.DurableBuffer.Configuration;
@@ -267,7 +266,8 @@ public sealed class BufferIntegrationTests
         var store = new FileChunkStore(_storagePath);
         var metrics = new BufferMetricsCounter();
         var events = new BufferEventBroadcaster();
-        var chunkChannel = Channel.CreateUnbounded<StoredChunk>();
+        var sealedChunks = new List<StoredChunk>();
+        var catalog = new ChunkCatalog();
         var backpressure = new BackpressureController(options);
 
         var oldChunkId = ChunkId.NewChunkId();
@@ -278,6 +278,20 @@ public sealed class BufferIntegrationTests
             await store.SealAsync(oldChunkId, data, metadata with { ChunkId = oldChunkId.Value }, TestContext.CancellationToken);
         }
 
+        var oldChunk = new StoredChunk {
+            Id = oldChunkId,
+            ChunkFilePath = Path.Combine(_storagePath, "sealed", $"{oldChunkId.Value}.chunk"),
+            MetadataFilePath = Path.Combine(_storagePath, "sealed", $"{oldChunkId.Value}.meta.json"),
+            Metadata = new ChunkMetadata {
+                ChunkId = oldChunkId.Value,
+                CreatedUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
+                RecordCount = 1,
+                PayloadBytes = options.MaxDiskBytes,
+                Checksum = "placeholder"
+            }
+        };
+        catalog.AddAvailable(oldChunk);
+
         using var buffer = new DurableBuffer<string>(
             new JsonRecordSerializer<string>(),
             store,
@@ -285,7 +299,21 @@ public sealed class BufferIntegrationTests
             metrics,
             events,
             backpressure,
-            chunkChannel.Writer);
+            (chunk, _) => {
+                catalog.AddAvailable(chunk);
+                sealedChunks.Add(chunk);
+                return ValueTask.CompletedTask;
+            },
+            async ct => {
+                if (!catalog.TryRemoveOldestAvailable(out var oldest))
+                {
+                    return false;
+                }
+
+                await store.DeleteAsync(oldest, ct);
+                metrics.AddDiskBytes(-oldest.Metadata.PayloadBytes);
+                return true;
+            });
         metrics.AddDiskBytes(options.MaxDiskBytes);
 
         var result = await buffer.WriteAsync("new", TestContext.CancellationToken);
@@ -293,7 +321,8 @@ public sealed class BufferIntegrationTests
 
         Assert.AreEqual(BufferWriteStatus.DroppedOldestAndAccepted, result.Status);
         Assert.IsFalse(File.Exists(Path.Combine(_storagePath, "sealed", $"{oldChunkId.Value}.chunk")));
-        Assert.IsTrue(chunkChannel.Reader.TryRead(out var newChunk));
+        Assert.AreEqual(1, sealedChunks.Count);
+        var newChunk = sealedChunks[0];
         Assert.AreNotEqual(oldChunkId, newChunk.Id);
     }
 

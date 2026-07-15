@@ -1,4 +1,4 @@
-﻿using System.Threading.Channels;
+using System.Threading.Channels;
 using DeltaZulu.DurableBuffer.Abstractions;
 using DeltaZulu.DurableBuffer.Chunks;
 using DeltaZulu.DurableBuffer.Metrics;
@@ -9,26 +9,29 @@ namespace DeltaZulu.DurableBuffer;
 internal sealed class DurableBufferReader : IDurableBufferReader
 {
     private readonly ChannelReader<StoredChunk> _channelReader;
-    private readonly ChannelWriter<StoredChunk> _channelWriter;
     private readonly IChunkStore _store;
     private readonly BufferMetricsCounter _metrics;
     private readonly BufferEventBroadcaster _events;
     private readonly Action? _signalSpaceAvailable;
+    private readonly Func<StoredChunk, CancellationToken, ValueTask>? _onChunkReleased;
+    private readonly Action<StoredChunk>? _onChunkTerminal;
 
     public DurableBufferReader(
         ChannelReader<StoredChunk> channelReader,
-        ChannelWriter<StoredChunk> channelWriter,
         IChunkStore store,
         BufferMetricsCounter metrics,
         BufferEventBroadcaster events,
-        Action? signalSpaceAvailable = null)
+        Action? signalSpaceAvailable = null,
+        Func<StoredChunk, CancellationToken, ValueTask>? onChunkReleased = null,
+        Action<StoredChunk>? onChunkTerminal = null)
     {
         _channelReader = channelReader;
-        _channelWriter = channelWriter;
         _store = store;
         _metrics = metrics;
         _events = events;
         _signalSpaceAvailable = signalSpaceAvailable;
+        _onChunkReleased = onChunkReleased;
+        _onChunkTerminal = onChunkTerminal;
     }
 
     public ChannelReader<StoredChunk> SealedChunks => _channelReader;
@@ -40,6 +43,7 @@ internal sealed class DurableBufferReader : IDurableBufferReader
         await _store.DeleteAsync(chunk, cancellationToken);
         _metrics.ChunkCompleted();
         _metrics.AddDiskBytes(-chunk.Metadata.PayloadBytes);
+        _onChunkTerminal?.Invoke(chunk);
         _signalSpaceAvailable?.Invoke();
         _events.Publish(BufferEvent.Create(
             BufferEventType.BufferChunkCompleted, chunk.Id.Value, chunk: chunk));
@@ -49,7 +53,10 @@ internal sealed class DurableBufferReader : IDurableBufferReader
         StoredChunk chunk,
         CancellationToken cancellationToken = default)
     {
-        await _channelWriter.WriteAsync(chunk, cancellationToken);
+        if (_onChunkReleased is not null)
+        {
+            await _onChunkReleased(chunk, cancellationToken);
+        }
         _metrics.ChunkReleased();
         _events.Publish(BufferEvent.Create(
             BufferEventType.BufferChunkReleased, chunk.Id.Value,
@@ -64,6 +71,7 @@ internal sealed class DurableBufferReader : IDurableBufferReader
         var deadLettered = await _store.MoveToDeadLetterAsync(chunk, cancellationToken);
         _metrics.AddDiskBytes(-chunk.Metadata.PayloadBytes);
         _metrics.AddDeadLetterBytes(chunk.Metadata.PayloadBytes);
+        _onChunkTerminal?.Invoke(chunk);
         _signalSpaceAvailable?.Invoke();
         _metrics.ChunkDeadLettered();
         _events.Publish(BufferEvent.Create(

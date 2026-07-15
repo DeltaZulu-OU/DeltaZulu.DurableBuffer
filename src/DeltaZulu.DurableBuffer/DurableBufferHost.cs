@@ -22,8 +22,11 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
     private readonly DurableBufferOptions _options;
     private readonly ILogger? _logger;
     private readonly RxChunkPublisher _rxChunkPublisher;
+    private readonly ChunkCatalog _catalog = new();
+    private readonly SemaphoreSlim _dispatchSignal = new(0, int.MaxValue);
 
     private Task? _rotationTask;
+    private Task? _dispatcherTask;
     private CancellationTokenSource? _cts;
     private bool _started;
     private bool _disposed;
@@ -33,18 +36,25 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         IRecordSerializer<T> serializer,
         ILoggerFactory? loggerFactory = null)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.DispatchChannelCapacity, 0);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.MaxInFlightChunks, 0);
+
         _options = options;
         _logger = loggerFactory?.CreateLogger<DurableBufferHost<T>>();
 
         _eventBroadcaster = new BufferEventBroadcaster();
         _metrics = new BufferMetricsCounter();
         _metrics.UpdateDiskUsage(0, options.MaxDiskBytes);
+        _metrics.UpdateDispatchQueueCapacity(options.DispatchChannelCapacity);
+        _metrics.UpdateMaxInFlightChunks(options.MaxInFlightChunks);
+        _metrics.UpdateDispatcherWaitReason(DispatchWaitReason.None);
 
         _chunkChannel = Channel.CreateBounded<StoredChunk>(
-            new BoundedChannelOptions(1024) {
+            new BoundedChannelOptions(options.DispatchChannelCapacity) {
                 SingleReader = false,
-                SingleWriter = false,
-                FullMode = BoundedChannelFullMode.Wait
+                SingleWriter = true,
+                FullMode = BoundedChannelFullMode.Wait,
+                AllowSynchronousContinuations = false
             });
 
         _store = new FileChunkStore(
@@ -70,18 +80,30 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         var backpressure = new BackpressureController(options);
 
         _buffer = new DurableBuffer<T>(
-            serializer, _store, options, _metrics,
-            _eventBroadcaster, backpressure, _chunkChannel.Writer);
+            serializer,
+            _store,
+            options,
+            _metrics,
+            _eventBroadcaster,
+            backpressure,
+            OnChunkSealedAsync,
+            TryDropOldestAvailableChunkAsync);
 
         _reader = new DurableBufferReader(
-            _chunkChannel.Reader, _chunkChannel.Writer,
-            _store, _metrics, _eventBroadcaster,
-            _buffer.SignalSpaceAvailable);
+            _chunkChannel.Reader,
+            _store,
+            _metrics,
+            _eventBroadcaster,
+            _buffer.SignalSpaceAvailable,
+            OnChunkReleasedAsync,
+            OnChunkTerminal);
         _rxChunkPublisher = new RxChunkPublisher(_chunkChannel.Reader, _eventBroadcaster);
 
         _recoveryManager = new FileSystemRecoveryManager(
-            _store, _chunkChannel.Writer, _metrics,
-            _eventBroadcaster, options.StoragePath,
+            _store,
+            _metrics,
+            _eventBroadcaster,
+            options.StoragePath,
             loggerFactory?.CreateLogger<FileSystemRecoveryManager>());
     }
 
@@ -104,7 +126,13 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
 
         _eventBroadcaster.Publish(BufferEvent.Create(BufferEventType.BufferStarted));
 
-        await _recoveryManager.RecoverAsync(_cts.Token);
+        var recovery = await _recoveryManager.RecoverChunksAsync(_cts.Token);
+        foreach (var chunk in recovery.RecoveredChunks)
+        {
+            _catalog.AddAvailable(chunk);
+        }
+
+        UpdateDispatchPressure(DispatchWaitReason.None);
 
         var diskUsed = await _store.GetDiskBytesUsedAsync(_cts.Token);
         _metrics.UpdateDiskUsage(diskUsed, _options.MaxDiskBytes);
@@ -115,10 +143,13 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         var quarantineBytesUsed = await _store.GetQuarantineBytesUsedAsync(_cts.Token);
         _metrics.UpdateQuarantineUsage(quarantineBytesUsed, _options.MaxQuarantineBytes);
 
+        _dispatcherTask = Task.Run(() => RunDispatcherAsync(_cts.Token), _cts.Token);
         _rotationTask = Task.Run(() => RunRotationTimerAsync(_cts.Token), _cts.Token);
 
+        SignalDispatcher();
+
         _started = true;
-        _logger?.LogInformation("Buffer host started. Storage: {Path}", _options.StoragePath);
+        _logger?.LogInformation("Buffer host started. Storage: {Path}. Recovered={Recovered}", _options.StoragePath, recovery.Summary.RecoveredChunks);
     }
 
     public async ValueTask StopAsync(CancellationToken cancellationToken = default)
@@ -133,12 +164,22 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
 
         await _buffer.FlushAsync(cancellationToken);
 
-        _chunkChannel.Writer.TryComplete();
-
         if (_cts is not null)
         {
             await _cts.CancelAsync();
         }
+
+        SignalDispatcher();
+
+        if (_dispatcherTask is not null)
+        {
+            try { await _dispatcherTask.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken); }
+            catch (TimeoutException) { }
+            catch (OperationCanceledException) { }
+        }
+
+        DispatchAvailableChunksForStop();
+        _chunkChannel.Writer.TryComplete();
 
         if (_rotationTask is not null)
         {
@@ -147,12 +188,9 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
             catch (OperationCanceledException) { }
         }
 
+        UpdateDispatchPressure(DispatchWaitReason.Stopping);
         _eventBroadcaster.Publish(BufferEvent.Create(BufferEventType.BufferStopped));
 
-        // Consumers may still be finishing work for chunks they read before the
-        // channel completed. Keep observers subscribed until disposal so those
-        // terminal chunk events (for example dead-letter notifications) are not
-        // dropped during StopAsync.
         _started = false;
         _logger?.LogInformation("Buffer host stopped.");
     }
@@ -173,7 +211,117 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         _rxChunkPublisher.Dispose();
         _buffer.Dispose();
         _cts?.Dispose();
+        _dispatchSignal.Dispose();
         _disposed = true;
+    }
+
+    private ValueTask OnChunkSealedAsync(StoredChunk chunk, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _catalog.AddAvailable(chunk);
+        UpdateDispatchPressure(DispatchWaitReason.None);
+        SignalDispatcher();
+        return ValueTask.CompletedTask;
+    }
+
+    private async ValueTask<bool> TryDropOldestAvailableChunkAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!_catalog.TryRemoveOldestAvailable(out var oldest))
+        {
+            return false;
+        }
+
+        await _store.DeleteAsync(oldest, cancellationToken);
+        _metrics.AddDiskBytes(-oldest.Metadata.PayloadBytes);
+        _eventBroadcaster.Publish(BufferEvent.Create(
+            BufferEventType.BufferChunkDropped,
+            oldest.Id.Value,
+            detail: "Dropped oldest available chunk to free space",
+            chunk: oldest));
+
+        UpdateDispatchPressure(DispatchWaitReason.None);
+        return true;
+    }
+
+    private ValueTask OnChunkReleasedAsync(StoredChunk chunk, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _catalog.TryMarkAvailable(chunk);
+        UpdateDispatchPressure(DispatchWaitReason.None);
+        SignalDispatcher();
+        return ValueTask.CompletedTask;
+    }
+
+    private void OnChunkTerminal(StoredChunk chunk)
+    {
+        _catalog.TryMarkTerminal(chunk);
+        UpdateDispatchPressure(DispatchWaitReason.None);
+        SignalDispatcher();
+    }
+
+    private void DispatchAvailableChunksForStop()
+    {
+        while (_catalog.Snapshot().EnqueuedCount < _options.MaxInFlightChunks &&
+               _catalog.TryDequeueAvailable(out var chunk))
+        {
+            if (!_chunkChannel.Writer.TryWrite(chunk))
+            {
+                _catalog.TryMarkAvailable(chunk);
+                UpdateDispatchPressure(DispatchWaitReason.DispatchQueueFull);
+                return;
+            }
+        }
+
+        UpdateDispatchPressure(DispatchWaitReason.None);
+    }
+
+    private async Task RunDispatcherAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (!await _chunkChannel.Writer.WaitToWriteAsync(cancellationToken))
+                {
+                    return;
+                }
+
+                var snapshot = _catalog.Snapshot();
+                if (snapshot.EnqueuedCount >= _options.MaxInFlightChunks)
+                {
+                    UpdateDispatchPressure(DispatchWaitReason.InFlightLimitReached);
+                    await _dispatchSignal.WaitAsync(cancellationToken);
+                    continue;
+                }
+
+                if (!_catalog.TryDequeueAvailable(out var chunk))
+                {
+                    UpdateDispatchPressure(DispatchWaitReason.NoAvailableChunks);
+                    await _dispatchSignal.WaitAsync(cancellationToken);
+                    continue;
+                }
+
+                UpdateDispatchPressure(DispatchWaitReason.None);
+                await _chunkChannel.Writer.WriteAsync(chunk, cancellationToken);
+                UpdateDispatchPressure(DispatchWaitReason.None);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (ChannelClosedException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Error in dispatcher loop");
+                UpdateDispatchPressure(DispatchWaitReason.DispatchQueueFull);
+                await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+            }
+        }
     }
 
     private async Task RunRotationTimerAsync(CancellationToken cancellationToken)
@@ -194,5 +342,22 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
                 _logger?.LogError(ex, "Error in rotation timer");
             }
         }
+    }
+
+    private void UpdateDispatchPressure(DispatchWaitReason waitReason)
+    {
+        var catalogSnapshot = _catalog.Snapshot();
+        _metrics.UpdateDispatchQueueDepth(_chunkChannel.Reader.CanCount ? _chunkChannel.Reader.Count : 0);
+        _metrics.UpdateInFlightChunks(catalogSnapshot.EnqueuedCount);
+        _metrics.UpdateAvailableChunks(catalogSnapshot.AvailableCount);
+        _metrics.UpdateOldestAvailableChunkAge(catalogSnapshot.OldestAvailableAge);
+        _metrics.UpdateOldestDispatchedChunkAge(catalogSnapshot.OldestEnqueuedAge);
+        _metrics.UpdateDispatcherWaitReason(waitReason);
+    }
+
+    private void SignalDispatcher()
+    {
+        try { _dispatchSignal.Release(); }
+        catch (SemaphoreFullException) { }
     }
 }

@@ -23,6 +23,8 @@ public sealed record DurableBufferOptions
     public int MaxChunkRecords { get; init; } = 1000;
     public long MaxChunkBytes { get; init; } = 4L * 1024 * 1024;
     public TimeSpan MaxChunkAge { get; init; } = TimeSpan.FromSeconds(5);
+    public int DispatchChannelCapacity { get; init; } = 1024;
+    public int MaxInFlightChunks { get; init; } = 256;
 
     public BufferFullPolicy FullPolicy { get; init; } = BufferFullPolicy.Block;
 }

@@ -1,4 +1,3 @@
-using System.Threading.Channels;
 using DeltaZulu.DurableBuffer.Chunks;
 using DeltaZulu.DurableBuffer.Metrics;
 using DeltaZulu.DurableBuffer.Storage;
@@ -9,7 +8,6 @@ namespace DeltaZulu.DurableBuffer.Recovery;
 internal sealed class FileSystemRecoveryManager : IRecoveryManager
 {
     private readonly string _basePath;
-    private readonly ChannelWriter<StoredChunk> _dispatchWriter;
     private readonly BufferEventBroadcaster _events;
     private readonly ILogger? _logger;
     private readonly BufferMetricsCounter _metrics;
@@ -17,14 +15,12 @@ internal sealed class FileSystemRecoveryManager : IRecoveryManager
 
     public FileSystemRecoveryManager(
         IChunkStore store,
-        ChannelWriter<StoredChunk> dispatchWriter,
         BufferMetricsCounter metrics,
         BufferEventBroadcaster events,
         string basePath,
         ILogger? logger = null)
     {
         _store = store;
-        _dispatchWriter = dispatchWriter;
         _metrics = metrics;
         _events = events;
         _basePath = basePath;
@@ -33,6 +29,12 @@ internal sealed class FileSystemRecoveryManager : IRecoveryManager
 
     public async ValueTask<RecoverySummary> RecoverAsync(CancellationToken cancellationToken = default)
     {
+        var result = await RecoverChunksAsync(cancellationToken);
+        return result.Summary;
+    }
+
+    internal async ValueTask<RecoveryResult> RecoverChunksAsync(CancellationToken cancellationToken = default)
+    {
         _events.Publish(BufferEvent.Create(BufferEventType.BufferRecoveryStarted));
 
         var recovered = 0;
@@ -40,6 +42,7 @@ internal sealed class FileSystemRecoveryManager : IRecoveryManager
         const int deadLettered = 0;
         long estimatedLost = 0;
 
+        var recoveredChunks = new List<StoredChunk>();
         quarantined += await QuarantineActiveChunksAsync(cancellationToken);
         estimatedLost += quarantined > 0 ? -1 : 0; // unknown record count
 
@@ -60,7 +63,7 @@ internal sealed class FileSystemRecoveryManager : IRecoveryManager
                     continue;
                 }
 
-                await _dispatchWriter.WriteAsync(chunk, cancellationToken);
+                recoveredChunks.Add(chunk);
                 recovered++;
             }
             catch (Exception ex)
@@ -87,8 +90,12 @@ internal sealed class FileSystemRecoveryManager : IRecoveryManager
             "Buffer recovery complete: {Recovered} recovered, {Quarantined} quarantined",
             recovered, quarantined);
 
-        return summary;
+        return new RecoveryResult(summary, recoveredChunks);
     }
+
+    internal sealed record RecoveryResult(
+        RecoverySummary Summary,
+        IReadOnlyList<StoredChunk> RecoveredChunks);
 
     private static void SafeDelete(string path)
     {

@@ -7,12 +7,12 @@ The library is intentionally small: it has no runtime dependencies beyond `Micro
 ## Features
 
 - **Durable local storage**: sealed chunks are written atomically to disk and survive process crashes.
-- **Application-owned consumption**: records are accumulated in memory, sealed by record count, byte size, or age, and exposed through a `ChannelReader<StoredChunk>` for your consumer to complete, release, or dead-letter.
+- **Application-owned consumption**: records are accumulated in memory, sealed by record count, byte size, or age, and exposed through a bounded `ChannelReader<StoredChunk>` for your consumer to complete, release, or dead-letter.
 - **Backpressure controls**: choose whether a full live buffer blocks, rejects the newest record, or drops the oldest sealed chunk.
 - **Consumer-directed retry and dead-lettering**: consumers can release chunks back to the sealed queue for retry or move failed chunks into bounded dead-letter storage.
 - **Startup recovery**: valid sealed chunks are re-enqueued, incomplete active files are quarantined, legacy `dispatching/` files are migrated back to `sealed/`, and orphaned files are quarantined.
 - **Metrics and events**: query `BufferSnapshot` and subscribe to `BufferEvent` notifications, including dead-letter and quarantine eviction events.
-- **Reactive contracts without framework dependency**: `DeltaZulu.DurableBuffer.Rx` provides demand-aware publisher/subscriber and event-stream interfaces without requiring Rx.NET/R3/Dataflow.
+- **Reactive facade without framework dependency**: `DeltaZulu.DurableBuffer.Rx` is a convenience facade over the same single-buffer queue and event stream; it does not add pub/sub routing, fan-out, or broker semantics, and it requires no Rx.NET/R3/Dataflow dependency.
 - **Format-agnostic records**: provide any `IRecordSerializer<T>` implementation; a JSON serializer is included.
 
 ## Requirements
@@ -111,13 +111,13 @@ await consumerTask;
 
 `DurableBufferHost<T>` wires together the write path, reader channel, file store, recovery manager, metrics, and event broadcaster.
 
-- `StartAsync(...)`: performs recovery, starts age-based chunk rotation, and publishes startup events.
+- `StartAsync(...)`: performs recovery to an in-memory catalog, starts dispatcher/rotation workers, and publishes startup events.
 - `StopAsync(...)`: marks the writer as stopping, flushes the open chunk, completes the sealed-chunk channel, and publishes stopped events.
 - `Writer`: exposes `IDurableBufferWriter<T>` for writes, flushes, and snapshots.
 - `Reader`: exposes `IDurableBufferReader` for consuming sealed chunks and reporting outcomes.
 - `Events`: exposes an `IObservable<BufferEvent>` stream.
 - `RxEvents`: exposes an `IRxEventStream<BufferEvent>` stream.
-- `RxChunks`: exposes an `IRxPublisher<StoredChunk>` for demand-aware chunk dispatch.
+- `RxChunks`: exposes an `IRxPublisher<StoredChunk>` facade for demand-aware queue dispatch over the same sealed-chunk reader.
 - `RxChunkDiagnostics`: exposes active `.Rx` subscription and dispatch snapshots.
 
 ### `IDurableBufferWriter<T>`
@@ -137,14 +137,14 @@ Use the reader from your own forwarding loop:
 
 ### `.Rx` contracts
 
-`DeltaZulu.DurableBuffer.Rx` contains a small DeltaZulu-owned contract surface:
+`DeltaZulu.DurableBuffer.Rx` contains a small DeltaZulu-owned reactive interface facade for user convenience. It adapts the existing durable-buffer queue and event stream to request/callback-shaped APIs; it is not a pub/sub implementation and does not create topics, fan-out branches, or per-subscriber durable state:
 
 - `IRxPublisher<T>`, `IRxSubscriber<T>`, `IRxSubscription`, `IRxProcessor<TIn,TOut>`
 - `IRxEventStream<TEvent>`, `IRxEventSink<TEvent>`
 - `RxCompletion` for success/failure completion signals
 - Interop adapters to/from `IObservable<T>` and `IAsyncEnumerable<T>`
 
-The core implementation still uses a bounded channel internally for chunk handoff.
+The core implementation still uses a bounded channel internally for chunk handoff, and the Rx facade does not change the single-consumer-attempt semantics of each delivered chunk.
 
 ### Serialization
 
@@ -162,6 +162,8 @@ The core implementation still uses a bounded channel internally for chunk handof
 | `MaxChunkRecords` | 1,000 | Record-count rotation threshold. |
 | `MaxChunkBytes` | 4 MiB | Byte-size rotation threshold. |
 | `MaxChunkAge` | 5 seconds | Age-based rotation threshold checked periodically. |
+| `DispatchChannelCapacity` | 1,024 | Bounded channel capacity used for dispatch handoff. |
+| `MaxInFlightChunks` | 256 | Maximum catalog chunks allowed in enqueued/dispatched state at once. |
 | `FullPolicy` | `Block` | Behavior when the live buffer is full. |
 
 ### Full-buffer policies
@@ -191,9 +193,9 @@ On startup, the recovery manager:
 
 1. Quarantines incomplete active files.
 2. Migrates files from the legacy `dispatching/` directory back to `sealed/`.
-3. Validates and re-enqueues sealed chunks.
+3. Validates sealed chunks and rebuilds catalog availability.
 4. Quarantines invalid chunks or orphaned metadata/payload files.
-5. Updates live disk, dead-letter, and quarantine usage metrics after recovery.
+5. Starts bounded dispatch from the catalog and updates live disk, dead-letter, and quarantine usage metrics.
 
 ## Metrics and events
 
