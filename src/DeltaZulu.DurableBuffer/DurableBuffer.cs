@@ -8,18 +8,19 @@ namespace DeltaZulu.DurableBuffer;
 
 internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
 {
-    private readonly IRecordSerializer<T> _serializer;
-    private readonly IChunkStore _store;
-    private readonly DurableBufferOptions _options;
-    private readonly BufferMetricsCounter _metrics;
-    private readonly BufferEventBroadcaster _events;
     private readonly BackpressureController _backpressure;
+    private readonly ChunkBuilder _chunkBuilder;
+    private readonly BufferEventBroadcaster _events;
+    private readonly BufferMetricsCounter _metrics;
     private readonly Func<StoredChunk, CancellationToken, ValueTask> _onChunkSealed;
+    private readonly DurableBufferOptions _options;
+    private readonly IRecordSerializer<T> _serializer;
+    private readonly SemaphoreSlim _spaceAvailable = new(0, int.MaxValue);
+    private readonly IChunkStore _store;
     private readonly Func<CancellationToken, ValueTask<bool>> _tryDropOldestChunk;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
-    private readonly ChunkBuilder _chunkBuilder;
+    private int _lastState;
     private volatile bool _stopping;
-    private readonly SemaphoreSlim _spaceAvailable = new(0, int.MaxValue);
 
     public DurableBuffer(
         IRecordSerializer<T> serializer,
@@ -46,13 +47,30 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
         _events.Publish(BufferEvent.Create(BufferEventType.BufferChunkOpened, _chunkBuilder.ChunkId.Value));
     }
 
-    internal void MarkStopping() => _stopping = true;
-
-    internal void SignalSpaceAvailable()
+    public void Dispose()
     {
-        try { _spaceAvailable.Release(); }
-        catch (SemaphoreFullException) { }
+        _chunkBuilder.Dispose();
+        _writeLock.Dispose();
+        _spaceAvailable.Dispose();
     }
+
+    public async ValueTask FlushAsync(CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!_chunkBuilder.IsEmpty)
+            {
+                await RotateChunkAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    public BufferSnapshot GetSnapshot() => _metrics.ToSnapshot();
 
     public async ValueTask<BufferWriteResult> WriteAsync(
         T record,
@@ -121,23 +139,7 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
         }
     }
 
-    public async ValueTask FlushAsync(CancellationToken cancellationToken = default)
-    {
-        await _writeLock.WaitAsync(cancellationToken);
-        try
-        {
-            if (!_chunkBuilder.IsEmpty)
-            {
-                await RotateChunkAsync(cancellationToken);
-            }
-        }
-        finally
-        {
-            _writeLock.Release();
-        }
-    }
-
-    public BufferSnapshot GetSnapshot() => _metrics.ToSnapshot();
+    internal void MarkStopping() => _stopping = true;
 
     internal async ValueTask RotateIfStaleAsync(CancellationToken cancellationToken)
     {
@@ -159,26 +161,10 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
         }
     }
 
-    private async ValueTask RotateChunkAsync(CancellationToken cancellationToken)
+    internal void SignalSpaceAvailable()
     {
-        var (data, metadata) = _chunkBuilder.Seal();
-
-        var storedChunk = await _store.SealAsync(
-            _chunkBuilder.ChunkId, data, metadata, cancellationToken);
-
-        _metrics.ChunkSealed();
-        _metrics.AddDiskBytes(data.Length);
-        _events.Publish(BufferEvent.Create(
-            BufferEventType.BufferChunkSealed, storedChunk.Id.Value, chunk: storedChunk));
-
-        await _onChunkSealed(storedChunk, cancellationToken);
-
-        _chunkBuilder.Reset();
-        _metrics.ChunkCreated();
-        _metrics.UpdateOpenChunkBytes(0);
-        _metrics.UpdateMemoryUsage(0);
-        _events.Publish(BufferEvent.Create(
-            BufferEventType.BufferChunkOpened, _chunkBuilder.ChunkId.Value));
+        try { _spaceAvailable.Release(); }
+        catch (SemaphoreFullException) { }
     }
 
     private async ValueTask<BufferWriteResult?> HandleBackpressureAsync(
@@ -252,12 +238,25 @@ internal sealed class DurableBuffer<T> : IDurableBufferWriter<T>, IDisposable
         }
     }
 
-    private int _lastState;
-
-    public void Dispose()
+    private async ValueTask RotateChunkAsync(CancellationToken cancellationToken)
     {
-        _chunkBuilder.Dispose();
-        _writeLock.Dispose();
-        _spaceAvailable.Dispose();
+        var (data, metadata) = _chunkBuilder.Seal();
+
+        var storedChunk = await _store.SealAsync(
+            _chunkBuilder.ChunkId, data, metadata, cancellationToken);
+
+        _metrics.ChunkSealed();
+        _metrics.AddDiskBytes(data.Length);
+        _events.Publish(BufferEvent.Create(
+            BufferEventType.BufferChunkSealed, storedChunk.Id.Value, chunk: storedChunk));
+
+        await _onChunkSealed(storedChunk, cancellationToken);
+
+        _chunkBuilder.Reset();
+        _metrics.ChunkCreated();
+        _metrics.UpdateOpenChunkBytes(0);
+        _metrics.UpdateMemoryUsage(0);
+        _events.Publish(BufferEvent.Create(
+            BufferEventType.BufferChunkOpened, _chunkBuilder.ChunkId.Value));
     }
 }

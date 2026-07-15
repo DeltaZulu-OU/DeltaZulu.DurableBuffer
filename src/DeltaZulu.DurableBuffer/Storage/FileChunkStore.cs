@@ -34,9 +34,83 @@ internal sealed class FileChunkStore : IChunkStore
         MigrateLegacyDispatchingDirectory(basePath);
     }
 
-    public string SealedPath { get; }
     public string DeadLetterPath { get; }
     public string QuarantinePath { get; }
+    public string SealedPath { get; }
+
+    public ValueTask DeleteAsync(StoredChunk chunk, CancellationToken cancellationToken = default)
+    {
+        SafeDelete(chunk.ChunkFilePath);
+        SafeDelete(chunk.MetadataFilePath);
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask<long> GetDeadLetterBytesUsedAsync(CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(GetDirectoryBytes(DeadLetterPath));
+
+    public ValueTask<long> GetDiskBytesUsedAsync(CancellationToken cancellationToken = default) =>
+        // Dead-letter and quarantine data is abandoned data with its own bounded ring-buffer
+        // budget (see GetDeadLetterBytesUsedAsync/GetQuarantineBytesUsedAsync); it must not
+        // compete with live, still-retryable chunks for the buffer's backpressure quota.
+        ValueTask.FromResult(GetDirectoryBytes(SealedPath));
+
+    public ValueTask<long> GetQuarantineBytesUsedAsync(CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(GetDirectoryBytes(QuarantinePath));
+
+    public ValueTask<IReadOnlyList<StoredChunk>> GetSealedChunksAsync(
+        CancellationToken cancellationToken = default) =>
+        ScanDirectoryAsync(SealedPath, cancellationToken);
+
+    public async ValueTask<StoredChunk> MoveToDeadLetterAsync(
+        StoredChunk chunk,
+        CancellationToken cancellationToken = default)
+    {
+        var moved = await MoveChunkAsync(chunk, DeadLetterPath);
+        await TrimDeadLetterAsync(cancellationToken);
+        return moved;
+    }
+
+    public ValueTask QuarantineAsync(string filePath, CancellationToken cancellationToken = default)
+    {
+        EnsureNotSymlink(filePath);
+        var dest = Path.Combine(QuarantinePath,
+            $"quarantined_{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffZ}_{Path.GetFileName(filePath)}");
+        File.Move(filePath, dest);
+        TrimQuarantine();
+        return ValueTask.CompletedTask;
+    }
+
+    public async ValueTask<StoredChunk> SealAsync(
+        ChunkId chunkId,
+        ReadOnlyMemory<byte> chunkData,
+        ChunkMetadata metadata,
+        CancellationToken cancellationToken = default)
+    {
+        var chunkFile = Path.Combine(SealedPath, $"{chunkId.Value}.chunk");
+        var metaFile = Path.Combine(SealedPath, $"{chunkId.Value}.meta.json");
+        var chunkTmp = chunkFile + ".tmp";
+        var metaTmp = metaFile + ".tmp";
+
+        await using (var fs = new FileStream(chunkTmp, FileMode.Create, FileAccess.Write,
+            FileShare.None, 65536, FileOptions.Asynchronous | FileOptions.SequentialScan))
+        {
+            await fs.WriteAsync(chunkData, cancellationToken);
+            await fs.FlushAsync(cancellationToken);
+        }
+
+        var metaJson = JsonSerializer.SerializeToUtf8Bytes(metadata);
+        await File.WriteAllBytesAsync(metaTmp, metaJson, cancellationToken);
+
+        File.Move(chunkTmp, chunkFile);
+        File.Move(metaTmp, metaFile);
+
+        return new StoredChunk {
+            Id = chunkId,
+            ChunkFilePath = chunkFile,
+            MetadataFilePath = metaFile,
+            Metadata = metadata
+        };
+    }
 
     private static void EnsureDirectories(string basePath)
     {
@@ -57,6 +131,76 @@ internal sealed class FileChunkStore : IChunkStore
                 // Best-effort permission hardening
             }
         }
+    }
+
+    private static void EnsureNotSymlink(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        var info = new FileInfo(path);
+        if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            throw new InvalidOperationException($"Refusing to operate on symlink: {path}");
+        }
+    }
+
+    private static long GetChunkFileBytes(StoredChunk chunk)
+    {
+        long total = 0;
+        if (File.Exists(chunk.ChunkFilePath))
+        {
+            total += new FileInfo(chunk.ChunkFilePath).Length;
+        }
+
+        if (File.Exists(chunk.MetadataFilePath))
+        {
+            total += new FileInfo(chunk.MetadataFilePath).Length;
+        }
+
+        return total;
+    }
+
+    private static long GetDirectoryBytes(string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return 0;
+        }
+
+        long total = 0;
+        foreach (var file in Directory.EnumerateFiles(directory))
+        {
+            total += new FileInfo(file).Length;
+        }
+        return total;
+    }
+
+    private static DateTimeOffset GetQuarantineTimestamp(FileInfo file)
+    {
+        const string prefix = "quarantined_";
+        if (file.Name.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            var afterPrefix = file.Name[prefix.Length..];
+            var separatorIndex = afterPrefix.IndexOf('_');
+            var token = separatorIndex >= 0 ? afterPrefix[..separatorIndex] : afterPrefix;
+            if (DateTimeOffset.TryParseExact(
+                token, "yyyyMMddTHHmmssfffZ", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed))
+            {
+                return parsed;
+            }
+        }
+
+        return file.LastWriteTimeUtc;
+    }
+
+    private static void SafeDelete(string path)
+    {
+        EnsureNotSymlink(path);
+        try { File.Delete(path); }
+        catch { /* best effort */ }
     }
 
     /// <summary>
@@ -100,95 +244,6 @@ internal sealed class FileChunkStore : IChunkStore
         {
             // Best effort: an undeletable empty directory is harmless.
         }
-    }
-
-    public async ValueTask<StoredChunk> SealAsync(
-        ChunkId chunkId,
-        ReadOnlyMemory<byte> chunkData,
-        ChunkMetadata metadata,
-        CancellationToken cancellationToken = default)
-    {
-        var chunkFile = Path.Combine(SealedPath, $"{chunkId.Value}.chunk");
-        var metaFile = Path.Combine(SealedPath, $"{chunkId.Value}.meta.json");
-        var chunkTmp = chunkFile + ".tmp";
-        var metaTmp = metaFile + ".tmp";
-
-        await using (var fs = new FileStream(chunkTmp, FileMode.Create, FileAccess.Write,
-            FileShare.None, 65536, FileOptions.Asynchronous | FileOptions.SequentialScan))
-        {
-            await fs.WriteAsync(chunkData, cancellationToken);
-            await fs.FlushAsync(cancellationToken);
-        }
-
-        var metaJson = JsonSerializer.SerializeToUtf8Bytes(metadata);
-        await File.WriteAllBytesAsync(metaTmp, metaJson, cancellationToken);
-
-        File.Move(chunkTmp, chunkFile);
-        File.Move(metaTmp, metaFile);
-
-        return new StoredChunk {
-            Id = chunkId,
-            ChunkFilePath = chunkFile,
-            MetadataFilePath = metaFile,
-            Metadata = metadata
-        };
-    }
-
-    public ValueTask DeleteAsync(StoredChunk chunk, CancellationToken cancellationToken = default)
-    {
-        SafeDelete(chunk.ChunkFilePath);
-        SafeDelete(chunk.MetadataFilePath);
-        return ValueTask.CompletedTask;
-    }
-
-    public async ValueTask<StoredChunk> MoveToDeadLetterAsync(
-        StoredChunk chunk,
-        CancellationToken cancellationToken = default)
-    {
-        var moved = await MoveChunkAsync(chunk, DeadLetterPath);
-        await TrimDeadLetterAsync(cancellationToken);
-        return moved;
-    }
-
-    public ValueTask QuarantineAsync(string filePath, CancellationToken cancellationToken = default)
-    {
-        EnsureNotSymlink(filePath);
-        var dest = Path.Combine(QuarantinePath,
-            $"quarantined_{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffZ}_{Path.GetFileName(filePath)}");
-        File.Move(filePath, dest);
-        TrimQuarantine();
-        return ValueTask.CompletedTask;
-    }
-
-    public ValueTask<IReadOnlyList<StoredChunk>> GetSealedChunksAsync(
-        CancellationToken cancellationToken = default) =>
-        ScanDirectoryAsync(SealedPath, cancellationToken);
-
-    public ValueTask<long> GetDiskBytesUsedAsync(CancellationToken cancellationToken = default) =>
-        // Dead-letter and quarantine data is abandoned data with its own bounded ring-buffer
-        // budget (see GetDeadLetterBytesUsedAsync/GetQuarantineBytesUsedAsync); it must not
-        // compete with live, still-retryable chunks for the buffer's backpressure quota.
-        ValueTask.FromResult(GetDirectoryBytes(SealedPath));
-
-    public ValueTask<long> GetDeadLetterBytesUsedAsync(CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult(GetDirectoryBytes(DeadLetterPath));
-
-    public ValueTask<long> GetQuarantineBytesUsedAsync(CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult(GetDirectoryBytes(QuarantinePath));
-
-    private static long GetDirectoryBytes(string directory)
-    {
-        if (!Directory.Exists(directory))
-        {
-            return 0;
-        }
-
-        long total = 0;
-        foreach (var file in Directory.EnumerateFiles(directory))
-        {
-            total += new FileInfo(file).Length;
-        }
-        return total;
     }
 
     private ValueTask<StoredChunk> MoveChunkAsync(StoredChunk chunk, string targetDir)
@@ -303,60 +358,5 @@ internal sealed class FileChunkStore : IChunkStore
             SafeDelete(file.FullName);
             _onQuarantineEvicted?.Invoke(file.FullName, file.Length);
         }
-    }
-
-    private static long GetChunkFileBytes(StoredChunk chunk)
-    {
-        long total = 0;
-        if (File.Exists(chunk.ChunkFilePath))
-        {
-            total += new FileInfo(chunk.ChunkFilePath).Length;
-        }
-
-        if (File.Exists(chunk.MetadataFilePath))
-        {
-            total += new FileInfo(chunk.MetadataFilePath).Length;
-        }
-
-        return total;
-    }
-
-    private static DateTimeOffset GetQuarantineTimestamp(FileInfo file)
-    {
-        const string prefix = "quarantined_";
-        if (file.Name.StartsWith(prefix, StringComparison.Ordinal))
-        {
-            var afterPrefix = file.Name[prefix.Length..];
-            var separatorIndex = afterPrefix.IndexOf('_');
-            var token = separatorIndex >= 0 ? afterPrefix[..separatorIndex] : afterPrefix;
-            if (DateTimeOffset.TryParseExact(
-                token, "yyyyMMddTHHmmssfffZ", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed))
-            {
-                return parsed;
-            }
-        }
-
-        return file.LastWriteTimeUtc;
-    }
-
-    private static void EnsureNotSymlink(string path)
-    {
-        if (!File.Exists(path))
-        {
-            return;
-        }
-
-        var info = new FileInfo(path);
-        if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
-        {
-            throw new InvalidOperationException($"Refusing to operate on symlink: {path}");
-        }
-    }
-
-    private static void SafeDelete(string path)
-    {
-        EnsureNotSymlink(path);
-        try { File.Delete(path); }
-        catch { /* best effort */ }
     }
 }

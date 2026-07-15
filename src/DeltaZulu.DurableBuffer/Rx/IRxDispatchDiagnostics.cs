@@ -2,9 +2,9 @@ namespace DeltaZulu.DurableBuffer.Rx;
 
 public interface IRxDispatchDiagnostics<T>
 {
-    IReadOnlyList<RxSubscriptionSnapshot> GetSubscriptionSnapshots();
-
     IReadOnlyList<RxDispatchSnapshot<T>> GetDispatchSnapshots();
+
+    IReadOnlyList<RxSubscriptionSnapshot> GetSubscriptionSnapshots();
 }
 
 public sealed record RxSubscriptionSnapshot(

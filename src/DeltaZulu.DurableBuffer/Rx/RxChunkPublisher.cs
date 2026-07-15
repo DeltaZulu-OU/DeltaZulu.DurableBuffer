@@ -7,17 +7,64 @@ namespace DeltaZulu.DurableBuffer.Rx;
 
 internal sealed class RxChunkPublisher : IRxPublisher<StoredChunk>, IRxDispatchDiagnostics<StoredChunk>, IDisposable
 {
-    private readonly ChannelReader<StoredChunk> _reader;
     private readonly BufferEventBroadcaster _events;
-    private readonly object _sync = new();
-    private long _nextSubscriptionId;
-    private bool _disposed;
+    private readonly ChannelReader<StoredChunk> _reader;
+    private readonly Lock _sync = new();
     private RxChunkSubscription? _activeSubscription;
+    private bool _disposed;
+    private long _nextSubscriptionId;
 
     public RxChunkPublisher(ChannelReader<StoredChunk> reader, BufferEventBroadcaster events)
     {
         _reader = reader;
         _events = events;
+    }
+
+    public void Dispose()
+    {
+        RxChunkSubscription? subscription;
+
+        lock (_sync)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            subscription = _activeSubscription;
+        }
+
+        if (subscription is not null)
+        {
+            subscription.CancelAsync().AsTask().GetAwaiter().GetResult();
+        }
+    }
+
+    public IReadOnlyList<RxDispatchSnapshot<StoredChunk>> GetDispatchSnapshots()
+    {
+        lock (_sync)
+        {
+            if (_activeSubscription is null)
+            {
+                return [];
+            }
+
+            return _activeSubscription.GetDispatchSnapshots();
+        }
+    }
+
+    public IReadOnlyList<RxSubscriptionSnapshot> GetSubscriptionSnapshots()
+    {
+        lock (_sync)
+        {
+            if (_activeSubscription is null)
+            {
+                return [];
+            }
+
+            return [_activeSubscription.ToSnapshot()];
+        }
     }
 
     public IRxSubscription Subscribe(IRxSubscriber<StoredChunk> subscriber)
@@ -42,32 +89,6 @@ internal sealed class RxChunkPublisher : IRxPublisher<StoredChunk>, IRxDispatchD
         }
     }
 
-    public IReadOnlyList<RxSubscriptionSnapshot> GetSubscriptionSnapshots()
-    {
-        lock (_sync)
-        {
-            if (_activeSubscription is null)
-            {
-                return [];
-            }
-
-            return [_activeSubscription.ToSnapshot()];
-        }
-    }
-
-    public IReadOnlyList<RxDispatchSnapshot<StoredChunk>> GetDispatchSnapshots()
-    {
-        lock (_sync)
-        {
-            if (_activeSubscription is null)
-            {
-                return [];
-            }
-
-            return _activeSubscription.GetDispatchSnapshots();
-        }
-    }
-
     private void OnSubscriptionTerminal(RxChunkSubscription subscription)
     {
         lock (_sync)
@@ -79,49 +100,27 @@ internal sealed class RxChunkPublisher : IRxPublisher<StoredChunk>, IRxDispatchD
         }
     }
 
-    public void Dispose()
-    {
-        RxChunkSubscription? subscription;
-
-        lock (_sync)
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
-            subscription = _activeSubscription;
-        }
-
-        if (subscription is not null)
-        {
-            subscription.CancelAsync().AsTask().GetAwaiter().GetResult();
-        }
-    }
-
     private sealed class RxChunkSubscription : IRxSubscription
     {
-        private readonly long _id;
-        private readonly IRxSubscriber<StoredChunk> _subscriber;
-        private readonly ChannelReader<StoredChunk> _reader;
-        private readonly BufferEventBroadcaster _events;
-        private readonly Action<RxChunkSubscription> _onTerminal;
+        private readonly ConcurrentDictionary<string, int> _attemptCounts = new();
         private readonly CancellationTokenSource _cts = new();
         private readonly SemaphoreSlim _demandSignal = new(0, int.MaxValue);
-        private readonly ConcurrentDictionary<string, int> _attemptCounts = new();
+        private readonly BufferEventBroadcaster _events;
+        private readonly long _id;
         private readonly ConcurrentDictionary<string, RxDispatchSnapshot<StoredChunk>> _inFlight = new();
-        private readonly string _subscriberType;
+        private readonly Action<RxChunkSubscription> _onTerminal;
+        private readonly ChannelReader<StoredChunk> _reader;
         private readonly DateTimeOffset _subscribedUtc;
-
-        private long _requestedTotal;
-        private long _deliveredTotal;
-        private long _currentDemand;
+        private readonly IRxSubscriber<StoredChunk> _subscriber;
+        private readonly string _subscriberType;
+        private long _cancelledTicks;
         private long _chunkSequence;
+        private long _completedTicks;
+        private long _currentDemand;
+        private long _deliveredTotal;
         private long _inFlightCount;
         private long _lastSignalTicks;
-        private long _completedTicks;
-        private long _cancelledTicks;
+        private long _requestedTotal;
         private int _state;
 
         public RxChunkSubscription(
@@ -147,7 +146,24 @@ internal sealed class RxChunkPublisher : IRxPublisher<StoredChunk>, IRxDispatchD
 
         public bool IsTerminal => Volatile.Read(ref _state) != 0;
 
-        public void Start() => _ = Task.Run(PumpAsync);
+        public ValueTask CancelAsync(CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Exchange(ref _state, 2) == 0)
+            {
+                Interlocked.Exchange(ref _cancelledTicks, DateTimeOffset.UtcNow.UtcTicks);
+                _cts.Cancel();
+                _events.Publish(BufferEvent.Create(
+                    BufferEventType.BufferRxSubscriptionCancelled,
+                    detail: $"SubscriptionId={_id}"));
+                _onTerminal(this);
+            }
+
+            return ValueTask.CompletedTask;
+        }
+
+        public async ValueTask DisposeAsync() => await CancelAsync();
+
+        public IReadOnlyList<RxDispatchSnapshot<StoredChunk>> GetDispatchSnapshots() => _inFlight.Values.ToList();
 
         public ValueTask RequestAsync(long count, CancellationToken cancellationToken = default)
         {
@@ -172,22 +188,7 @@ internal sealed class RxChunkPublisher : IRxPublisher<StoredChunk>, IRxDispatchD
             return ValueTask.CompletedTask;
         }
 
-        public ValueTask CancelAsync(CancellationToken cancellationToken = default)
-        {
-            if (Interlocked.Exchange(ref _state, 2) == 0)
-            {
-                Interlocked.Exchange(ref _cancelledTicks, DateTimeOffset.UtcNow.UtcTicks);
-                _cts.Cancel();
-                _events.Publish(BufferEvent.Create(
-                    BufferEventType.BufferRxSubscriptionCancelled,
-                    detail: $"SubscriptionId={_id}"));
-                _onTerminal(this);
-            }
-
-            return ValueTask.CompletedTask;
-        }
-
-        public async ValueTask DisposeAsync() => await CancelAsync();
+        public void Start() => _ = Task.Run(PumpAsync);
 
         public RxSubscriptionSnapshot ToSnapshot()
         {
@@ -205,7 +206,31 @@ internal sealed class RxChunkPublisher : IRxPublisher<StoredChunk>, IRxDispatchD
                 Interlocked.Read(ref _inFlightCount));
         }
 
-        public IReadOnlyList<RxDispatchSnapshot<StoredChunk>> GetDispatchSnapshots() => _inFlight.Values.ToList();
+        private static DateTimeOffset? ReadTimestamp(ref long ticks)
+        {
+            var value = Interlocked.Read(ref ticks);
+            return value == 0 ? null : new DateTimeOffset(value, TimeSpan.Zero);
+        }
+
+        private void CompleteInternal(RxCompletion completion)
+        {
+            if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
+            {
+                return;
+            }
+
+            Interlocked.Exchange(ref _completedTicks, DateTimeOffset.UtcNow.UtcTicks);
+            Interlocked.Exchange(ref _lastSignalTicks, DateTimeOffset.UtcNow.UtcTicks);
+
+            try { _subscriber.OnCompleted(completion); }
+            catch { }
+
+            _events.Publish(BufferEvent.Create(
+                BufferEventType.BufferRxSubscriptionCompleted,
+                detail: $"SubscriptionId={_id};Success={completion.IsSuccess}"));
+
+            _onTerminal(this);
+        }
 
         private async Task PumpAsync()
         {
@@ -288,32 +313,6 @@ internal sealed class RxChunkPublisher : IRxPublisher<StoredChunk>, IRxDispatchD
             {
                 CompleteInternal(RxCompletion.Failure(ex));
             }
-        }
-
-        private void CompleteInternal(RxCompletion completion)
-        {
-            if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
-            {
-                return;
-            }
-
-            Interlocked.Exchange(ref _completedTicks, DateTimeOffset.UtcNow.UtcTicks);
-            Interlocked.Exchange(ref _lastSignalTicks, DateTimeOffset.UtcNow.UtcTicks);
-
-            try { _subscriber.OnCompleted(completion); }
-            catch { }
-
-            _events.Publish(BufferEvent.Create(
-                BufferEventType.BufferRxSubscriptionCompleted,
-                detail: $"SubscriptionId={_id};Success={completion.IsSuccess}"));
-
-            _onTerminal(this);
-        }
-
-        private static DateTimeOffset? ReadTimestamp(ref long ticks)
-        {
-            var value = Interlocked.Read(ref ticks);
-            return value == 0 ? null : new DateTimeOffset(value, TimeSpan.Zero);
         }
     }
 }

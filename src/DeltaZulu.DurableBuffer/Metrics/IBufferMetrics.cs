@@ -4,43 +4,43 @@ namespace DeltaZulu.DurableBuffer.Metrics;
 
 public interface IBufferMetrics
 {
-    void RecordAccepted();
-
-    void RecordRejected();
-
-    void RecordDropped();
+    void ChunkCompleted();
 
     void ChunkCreated();
 
-    void ChunkSealed();
-
-    void ChunkCompleted();
-
-    void ChunkReleased();
-
     void ChunkDeadLettered();
-
-    void ChunkQuarantined();
 
     void ChunkDeadLetterEvicted();
 
+    void ChunkQuarantined();
+
     void ChunkQuarantineEvicted();
 
-    void UpdateState(BufferState state);
+    void ChunkReleased();
 
-    void UpdateDiskUsage(long bytesUsed, long bytesLimit);
+    void ChunkSealed();
+
+    void RecordAccepted();
+
+    void RecordDropped();
+
+    void RecordRejected();
+
+    BufferSnapshot ToSnapshot();
 
     void UpdateDeadLetterUsage(long bytesUsed, long bytesLimit);
 
-    void UpdateQuarantineUsage(long bytesUsed, long bytesLimit);
+    void UpdateDiskUsage(long bytesUsed, long bytesLimit);
 
     void UpdateMemoryUsage(long bytesUsed);
 
+    void UpdateOldestChunkAge(TimeSpan? age);
+
     void UpdateOpenChunkBytes(long bytes);
+
+    void UpdateQuarantineUsage(long bytesUsed, long bytesLimit);
 
     void UpdateSealedChunkCount(int count);
 
-    void UpdateOldestChunkAge(TimeSpan? age);
-
-    BufferSnapshot ToSnapshot();
+    void UpdateState(BufferState state);
 }

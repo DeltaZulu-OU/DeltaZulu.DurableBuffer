@@ -8,12 +8,12 @@ namespace DeltaZulu.DurableBuffer.Chunks;
 internal sealed class ChunkBuilder : IDisposable
 {
     private readonly DurableBufferOptions _options;
-    private MemoryStream _stream;
-    private IncrementalHash _hash;
     private ChunkId _chunkId;
     private DateTimeOffset _createdUtc;
-    private int _recordCount;
+    private IncrementalHash _hash;
     private long _payloadBytes;
+    private int _recordCount;
+    private MemoryStream _stream;
 
     public ChunkBuilder(DurableBufferOptions options)
     {
@@ -25,19 +25,16 @@ internal sealed class ChunkBuilder : IDisposable
         WriteHeader();
     }
 
-    public int RecordCount => _recordCount;
+    public ChunkId ChunkId => _chunkId;
     public long CurrentBytes => _stream.Length;
     public bool IsEmpty => _recordCount == 0;
-    public ChunkId ChunkId => _chunkId;
+    public int RecordCount => _recordCount;
 
     public bool ShouldRotate =>
         _recordCount > 0 && (
             _recordCount >= _options.MaxChunkRecords ||
             _stream.Length + ChunkFormat.FooterSize >= _options.MaxChunkBytes ||
             (DateTimeOffset.UtcNow - _createdUtc) >= _options.MaxChunkAge);
-
-    public bool WouldExceedLimit(int recordBytes) =>
-        _stream.Length + ChunkFormat.RecordLengthSize + recordBytes + ChunkFormat.FooterSize > _options.MaxChunkBytes;
 
     public void Append(ReadOnlyMemory<byte> serializedRecord)
     {
@@ -54,6 +51,26 @@ internal sealed class ChunkBuilder : IDisposable
 
         _recordCount++;
         _payloadBytes += span.Length;
+    }
+
+    public void Dispose()
+    {
+        _hash.Dispose();
+        _stream.Dispose();
+    }
+
+    public void Reset()
+    {
+        _hash.Dispose();
+        _stream.Dispose();
+
+        _stream = new MemoryStream(Math.Min((int)_options.MaxChunkBytes, 1024 * 1024));
+        _hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        _chunkId = ChunkId.NewChunkId();
+        _createdUtc = DateTimeOffset.UtcNow;
+        _recordCount = 0;
+        _payloadBytes = 0;
+        WriteHeader();
     }
 
     public (byte[] Data, ChunkMetadata Metadata) Seal()
@@ -83,19 +100,8 @@ internal sealed class ChunkBuilder : IDisposable
         return (data, metadata);
     }
 
-    public void Reset()
-    {
-        _hash.Dispose();
-        _stream.Dispose();
-
-        _stream = new MemoryStream(Math.Min((int)_options.MaxChunkBytes, 1024 * 1024));
-        _hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        _chunkId = ChunkId.NewChunkId();
-        _createdUtc = DateTimeOffset.UtcNow;
-        _recordCount = 0;
-        _payloadBytes = 0;
-        WriteHeader();
-    }
+    public bool WouldExceedLimit(int recordBytes) =>
+                        _stream.Length + ChunkFormat.RecordLengthSize + recordBytes + ChunkFormat.FooterSize > _options.MaxChunkBytes;
 
     private void WriteHeader()
     {
@@ -112,11 +118,5 @@ internal sealed class ChunkBuilder : IDisposable
             _createdUtc.UtcTicks);
 
         _stream.Write(header);
-    }
-
-    public void Dispose()
-    {
-        _hash.Dispose();
-        _stream.Dispose();
     }
 }

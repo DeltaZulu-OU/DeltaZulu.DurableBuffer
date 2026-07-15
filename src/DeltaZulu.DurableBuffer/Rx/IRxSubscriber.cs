@@ -2,9 +2,9 @@ namespace DeltaZulu.DurableBuffer.Rx;
 
 public interface IRxSubscriber<in T>
 {
-    void OnSubscribe(IRxSubscription subscription);
+    void OnCompleted(RxCompletion completion);
 
     ValueTask OnNextAsync(T item, CancellationToken cancellationToken = default);
 
-    void OnCompleted(RxCompletion completion);
+    void OnSubscribe(IRxSubscription subscription);
 }

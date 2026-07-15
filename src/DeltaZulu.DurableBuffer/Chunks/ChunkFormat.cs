@@ -5,23 +5,20 @@ namespace DeltaZulu.DurableBuffer.Chunks;
 
 public static class ChunkFormat
 {
-    public static ReadOnlySpan<byte> Magic => "DZBC"u8;
-    public const byte Version = 0x01;
-    public const int HeaderSize = 48;
-
-    public static ReadOnlySpan<byte> FooterMagic => "DZFE"u8;
-    public const int FooterSize = 40;
-    public const int RecordLengthSize = 4;
-
-    public const int MagicOffset = 0;
-    public const int VersionOffset = 4;
-    public const int ReservedOffset = 5;
     public const int ChunkIdOffset = 8;
     public const int CreatedUtcOffset = 40;
-
-    public const int FooterRecordCountOffset = 0;
     public const int FooterChecksumOffset = 4;
     public const int FooterMagicOffset = 36;
+    public const int FooterRecordCountOffset = 0;
+    public const int FooterSize = 40;
+    public const int HeaderSize = 48;
+    public const int MagicOffset = 0;
+    public const int RecordLengthSize = 4;
+    public const int ReservedOffset = 5;
+    public const byte Version = 0x01;
+    public const int VersionOffset = 4;
+    public static ReadOnlySpan<byte> FooterMagic => "DZFE"u8;
+    public static ReadOnlySpan<byte> Magic => "DZBC"u8;
 
     public static IReadOnlyList<ReadOnlyMemory<byte>> ReadRecords(ReadOnlyMemory<byte> chunkData)
     {

@@ -2,9 +2,9 @@ namespace DeltaZulu.DurableBuffer.Chunks;
 
 internal sealed class ChunkCatalog
 {
-    private readonly object _sync = new();
-    private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private readonly PriorityQueue<string, long> _available = new();
+    private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly Lock _sync = new();
 
     public void AddAvailable(StoredChunk chunk)
     {
@@ -12,6 +12,22 @@ internal sealed class ChunkCatalog
         {
             _entries[chunk.Id.Value] = new Entry(chunk, ChunkCatalogState.Available);
             _available.Enqueue(chunk.Id.Value, ToPriority(chunk.Metadata.CreatedUtc));
+        }
+    }
+
+    public ChunkCatalogSnapshot Snapshot()
+    {
+        lock (_sync)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var available = _entries.Values.Where(static entry => entry.State == ChunkCatalogState.Available).ToList();
+            var enqueued = _entries.Values.Where(static entry => entry.State == ChunkCatalogState.Enqueued).ToList();
+
+            return new ChunkCatalogSnapshot(
+                available.Count,
+                enqueued.Count,
+                available.Count == 0 ? null : now - available.Min(static entry => entry.Chunk.Metadata.CreatedUtc),
+                enqueued.Count == 0 ? null : now - enqueued.Min(static entry => entry.Chunk.Metadata.CreatedUtc));
         }
     }
 
@@ -84,22 +100,6 @@ internal sealed class ChunkCatalog
 
         chunk = null!;
         return false;
-    }
-
-    public ChunkCatalogSnapshot Snapshot()
-    {
-        lock (_sync)
-        {
-            var now = DateTimeOffset.UtcNow;
-            var available = _entries.Values.Where(static entry => entry.State == ChunkCatalogState.Available).ToList();
-            var enqueued = _entries.Values.Where(static entry => entry.State == ChunkCatalogState.Enqueued).ToList();
-
-            return new ChunkCatalogSnapshot(
-                available.Count,
-                enqueued.Count,
-                available.Count == 0 ? null : now - available.Min(static entry => entry.Chunk.Metadata.CreatedUtc),
-                enqueued.Count == 0 ? null : now - enqueued.Min(static entry => entry.Chunk.Metadata.CreatedUtc));
-        }
     }
 
     private static long ToPriority(DateTimeOffset createdUtc) => createdUtc.UtcTicks;

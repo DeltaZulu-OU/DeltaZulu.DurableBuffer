@@ -13,23 +13,22 @@ namespace DeltaZulu.DurableBuffer;
 public sealed class DurableBufferHost<T> : IAsyncDisposable
 {
     private readonly DurableBuffer<T> _buffer;
+    private readonly ChunkCatalog _catalog = new();
+    private readonly Channel<StoredChunk> _chunkChannel;
+    private readonly SemaphoreSlim _dispatchSignal = new(0, int.MaxValue);
+    private readonly BufferEventBroadcaster _eventBroadcaster;
+    private readonly ILogger? _logger;
+    private readonly BufferMetricsCounter _metrics;
+    private readonly DurableBufferOptions _options;
     private readonly DurableBufferReader _reader;
     private readonly FileSystemRecoveryManager _recoveryManager;
-    private readonly BufferEventBroadcaster _eventBroadcaster;
-    private readonly BufferMetricsCounter _metrics;
-    private readonly FileChunkStore _store;
-    private readonly Channel<StoredChunk> _chunkChannel;
-    private readonly DurableBufferOptions _options;
-    private readonly ILogger? _logger;
     private readonly RxChunkPublisher _rxChunkPublisher;
-    private readonly ChunkCatalog _catalog = new();
-    private readonly SemaphoreSlim _dispatchSignal = new(0, int.MaxValue);
-
-    private Task? _rotationTask;
-    private Task? _dispatcherTask;
+    private readonly FileChunkStore _store;
     private CancellationTokenSource? _cts;
-    private bool _started;
+    private Task? _dispatcherTask;
     private bool _disposed;
+    private Task? _rotationTask;
+    private bool _started;
 
     public DurableBufferHost(
         DurableBufferOptions options,
@@ -107,12 +106,32 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
             loggerFactory?.CreateLogger<FileSystemRecoveryManager>());
     }
 
-    public IDurableBufferWriter<T> Writer => _buffer;
-    public IDurableBufferReader Reader => _reader;
     public IObservable<BufferEvent> Events => _eventBroadcaster;
-    public IRxEventStream<BufferEvent> RxEvents => _eventBroadcaster;
-    public IRxPublisher<StoredChunk> RxChunks => _rxChunkPublisher;
+    public IDurableBufferReader Reader => _reader;
     public IRxDispatchDiagnostics<StoredChunk> RxChunkDiagnostics => _rxChunkPublisher;
+    public IRxPublisher<StoredChunk> RxChunks => _rxChunkPublisher;
+    public IRxEventStream<BufferEvent> RxEvents => _eventBroadcaster;
+    public IDurableBufferWriter<T> Writer => _buffer;
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (_started)
+        {
+            await StopAsync();
+        }
+
+        _eventBroadcaster.Complete();
+        _rxChunkPublisher.Dispose();
+        _buffer.Dispose();
+        _cts?.Dispose();
+        _dispatchSignal.Dispose();
+        _disposed = true;
+    }
 
     public async ValueTask StartAsync(CancellationToken cancellationToken = default)
     {
@@ -195,72 +214,6 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         _logger?.LogInformation("Buffer host stopped.");
     }
 
-    public async ValueTask DisposeAsync()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        if (_started)
-        {
-            await StopAsync();
-        }
-
-        _eventBroadcaster.Complete();
-        _rxChunkPublisher.Dispose();
-        _buffer.Dispose();
-        _cts?.Dispose();
-        _dispatchSignal.Dispose();
-        _disposed = true;
-    }
-
-    private ValueTask OnChunkSealedAsync(StoredChunk chunk, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        _catalog.AddAvailable(chunk);
-        UpdateDispatchPressure(DispatchWaitReason.None);
-        SignalDispatcher();
-        return ValueTask.CompletedTask;
-    }
-
-    private async ValueTask<bool> TryDropOldestAvailableChunkAsync(CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        if (!_catalog.TryRemoveOldestAvailable(out var oldest))
-        {
-            return false;
-        }
-
-        await _store.DeleteAsync(oldest, cancellationToken);
-        _metrics.AddDiskBytes(-oldest.Metadata.PayloadBytes);
-        _eventBroadcaster.Publish(BufferEvent.Create(
-            BufferEventType.BufferChunkDropped,
-            oldest.Id.Value,
-            detail: "Dropped oldest available chunk to free space",
-            chunk: oldest));
-
-        UpdateDispatchPressure(DispatchWaitReason.None);
-        return true;
-    }
-
-    private ValueTask OnChunkReleasedAsync(StoredChunk chunk, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        _catalog.TryMarkAvailable(chunk);
-        UpdateDispatchPressure(DispatchWaitReason.None);
-        SignalDispatcher();
-        return ValueTask.CompletedTask;
-    }
-
-    private void OnChunkTerminal(StoredChunk chunk)
-    {
-        _catalog.TryMarkTerminal(chunk);
-        UpdateDispatchPressure(DispatchWaitReason.None);
-        SignalDispatcher();
-    }
-
     private void DispatchAvailableChunksForStop()
     {
         while (_catalog.Snapshot().EnqueuedCount < _options.MaxInFlightChunks &&
@@ -275,6 +228,31 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         }
 
         UpdateDispatchPressure(DispatchWaitReason.None);
+    }
+
+    private ValueTask OnChunkReleasedAsync(StoredChunk chunk, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _catalog.TryMarkAvailable(chunk);
+        UpdateDispatchPressure(DispatchWaitReason.None);
+        SignalDispatcher();
+        return ValueTask.CompletedTask;
+    }
+
+    private ValueTask OnChunkSealedAsync(StoredChunk chunk, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _catalog.AddAvailable(chunk);
+        UpdateDispatchPressure(DispatchWaitReason.None);
+        SignalDispatcher();
+        return ValueTask.CompletedTask;
+    }
+
+    private void OnChunkTerminal(StoredChunk chunk)
+    {
+        _catalog.TryMarkTerminal(chunk);
+        UpdateDispatchPressure(DispatchWaitReason.None);
+        SignalDispatcher();
     }
 
     private async Task RunDispatcherAsync(CancellationToken cancellationToken)
@@ -344,6 +322,33 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         }
     }
 
+    private void SignalDispatcher()
+    {
+        try { _dispatchSignal.Release(); }
+        catch (SemaphoreFullException) { }
+    }
+
+    private async ValueTask<bool> TryDropOldestAvailableChunkAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!_catalog.TryRemoveOldestAvailable(out var oldest))
+        {
+            return false;
+        }
+
+        await _store.DeleteAsync(oldest, cancellationToken);
+        _metrics.AddDiskBytes(-oldest.Metadata.PayloadBytes);
+        _eventBroadcaster.Publish(BufferEvent.Create(
+            BufferEventType.BufferChunkDropped,
+            oldest.Id.Value,
+            detail: "Dropped oldest available chunk to free space",
+            chunk: oldest));
+
+        UpdateDispatchPressure(DispatchWaitReason.None);
+        return true;
+    }
+
     private void UpdateDispatchPressure(DispatchWaitReason waitReason)
     {
         var catalogSnapshot = _catalog.Snapshot();
@@ -353,11 +358,5 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
         _metrics.UpdateOldestAvailableChunkAge(catalogSnapshot.OldestAvailableAge);
         _metrics.UpdateOldestDispatchedChunkAge(catalogSnapshot.OldestEnqueuedAge);
         _metrics.UpdateDispatcherWaitReason(waitReason);
-    }
-
-    private void SignalDispatcher()
-    {
-        try { _dispatchSignal.Release(); }
-        catch (SemaphoreFullException) { }
     }
 }

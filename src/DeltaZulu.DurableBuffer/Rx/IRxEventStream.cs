@@ -7,7 +7,7 @@ public interface IRxEventStream<TEvent>
 
 public interface IRxEventSink<in TEvent>
 {
-    void OnEvent(TEvent evt);
-
     void OnCompleted(RxCompletion completion);
+
+    void OnEvent(TEvent evt);
 }

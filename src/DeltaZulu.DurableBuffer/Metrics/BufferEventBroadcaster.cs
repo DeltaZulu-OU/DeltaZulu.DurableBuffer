@@ -8,8 +8,35 @@ internal sealed class BufferEventBroadcaster : IObservable<BufferEvent>, IRxEven
 {
     private const int SubscriberQueueCapacity = 256;
 
-    private ImmutableList<SubscriberState> _subscribers = ImmutableList<SubscriberState>.Empty;
     private int _completed;
+    private ImmutableList<SubscriberState> _subscribers = ImmutableList<SubscriberState>.Empty;
+
+    public void Complete()
+    {
+        if (Interlocked.Exchange(ref _completed, 1) != 0)
+        {
+            return;
+        }
+
+        var subscribers = Interlocked.Exchange(ref _subscribers, ImmutableList<SubscriberState>.Empty);
+        foreach (var subscriber in subscribers)
+        {
+            subscriber.Complete(RxCompletion.Success);
+        }
+    }
+
+    public void Publish(BufferEvent evt)
+    {
+        foreach (var subscriber in Volatile.Read(ref _subscribers))
+        {
+            if (subscriber.TryEnqueue(evt))
+            {
+                continue;
+            }
+
+            subscriber.IncrementDropped();
+        }
+    }
 
     public IDisposable Subscribe(IObserver<BufferEvent> observer)
     {
@@ -72,31 +99,28 @@ internal sealed class BufferEventBroadcaster : IObservable<BufferEvent>, IRxEven
             });
     }
 
-    public void Publish(BufferEvent evt)
+    private void PublishDropNotice(long droppedCount) => Publish(BufferEvent.Create(
+            BufferEventType.BufferRxEventDropped,
+            detail: $"Dropped event count reached {droppedCount}"));
+
+    private void Remove(SubscriberState subscriber)
     {
-        foreach (var subscriber in Volatile.Read(ref _subscribers))
+        ImmutableList<SubscriberState> snapshot;
+        ImmutableList<SubscriberState> updated;
+
+        do
         {
-            if (subscriber.TryEnqueue(evt))
+            snapshot = Volatile.Read(ref _subscribers);
+            updated = snapshot.Remove(subscriber);
+
+            if (ReferenceEquals(snapshot, updated))
             {
-                continue;
+                return;
             }
-
-            subscriber.IncrementDropped();
         }
-    }
-
-    public void Complete()
-    {
-        if (Interlocked.Exchange(ref _completed, 1) != 0)
-        {
-            return;
-        }
-
-        var subscribers = Interlocked.Exchange(ref _subscribers, ImmutableList<SubscriberState>.Empty);
-        foreach (var subscriber in subscribers)
-        {
-            subscriber.Complete(RxCompletion.Success);
-        }
+        while (!ReferenceEquals(
+            Interlocked.CompareExchange(ref _subscribers, updated, snapshot),
+            snapshot));
     }
 
     private IDisposable SubscribeCore(Action<BufferEvent> onEvent, Action<RxCompletion> onCompleted)
@@ -125,63 +149,32 @@ internal sealed class BufferEventBroadcaster : IObservable<BufferEvent>, IRxEven
         return subscriber;
     }
 
-    private void PublishDropNotice(long droppedCount)
+    private sealed class EmptyDisposable : IDisposable
     {
-        Publish(BufferEvent.Create(
-            BufferEventType.BufferRxEventDropped,
-            detail: $"Dropped event count reached {droppedCount}"));
-    }
+        public static EmptyDisposable Instance { get; } = new();
 
-    private void Remove(SubscriberState subscriber)
-    {
-        ImmutableList<SubscriberState> snapshot;
-        ImmutableList<SubscriberState> updated;
-
-        do
+        public void Dispose()
         {
-            snapshot = Volatile.Read(ref _subscribers);
-            updated = snapshot.Remove(subscriber);
-
-            if (ReferenceEquals(snapshot, updated))
-            {
-                return;
-            }
         }
-        while (!ReferenceEquals(
-            Interlocked.CompareExchange(ref _subscribers, updated, snapshot),
-            snapshot));
     }
 
     private sealed class SubscriberState(
-        BufferEventBroadcaster parent,
+            BufferEventBroadcaster parent,
         Action<BufferEvent> onEvent,
         Action<RxCompletion> onCompleted) : IDisposable
     {
+        private readonly CancellationTokenSource _cts = new();
+
         private readonly Channel<BufferEvent> _queue = Channel.CreateBounded<BufferEvent>(
-            new BoundedChannelOptions(SubscriberQueueCapacity)
-            {
+            new BoundedChannelOptions(SubscriberQueueCapacity) {
                 SingleReader = true,
                 SingleWriter = false,
                 FullMode = BoundedChannelFullMode.Wait
             });
 
-        private readonly CancellationTokenSource _cts = new();
+        private RxCompletion _completion = RxCompletion.Success;
         private int _disposed;
         private long _dropped;
-        private RxCompletion _completion = RxCompletion.Success;
-
-        public void Start() => _ = Task.Run(PumpAsync);
-
-        public bool TryEnqueue(BufferEvent evt) => _queue.Writer.TryWrite(evt);
-
-        public void IncrementDropped()
-        {
-            var dropped = Interlocked.Increment(ref _dropped);
-            if (dropped % 100 == 0)
-            {
-                parent.PublishDropNotice(dropped);
-            }
-        }
 
         public void Complete(RxCompletion completion)
         {
@@ -201,6 +194,19 @@ internal sealed class BufferEventBroadcaster : IObservable<BufferEvent>, IRxEven
             parent.Remove(this);
         }
 
+        public void IncrementDropped()
+        {
+            var dropped = Interlocked.Increment(ref _dropped);
+            if (dropped % 100 == 0)
+            {
+                parent.PublishDropNotice(dropped);
+            }
+        }
+
+        public void Start() => _ = Task.Run(PumpAsync);
+
+        public bool TryEnqueue(BufferEvent evt) => _queue.Writer.TryWrite(evt);
+
         private async Task PumpAsync()
         {
             try
@@ -218,15 +224,6 @@ internal sealed class BufferEventBroadcaster : IObservable<BufferEvent>, IRxEven
                 onCompleted(_completion);
                 parent.Remove(this);
             }
-        }
-    }
-
-    private sealed class EmptyDisposable : IDisposable
-    {
-        public static EmptyDisposable Instance { get; } = new();
-
-        public void Dispose()
-        {
         }
     }
 }

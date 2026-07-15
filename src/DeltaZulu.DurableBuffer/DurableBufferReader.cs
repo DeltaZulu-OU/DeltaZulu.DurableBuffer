@@ -9,12 +9,12 @@ namespace DeltaZulu.DurableBuffer;
 internal sealed class DurableBufferReader : IDurableBufferReader
 {
     private readonly ChannelReader<StoredChunk> _channelReader;
-    private readonly IChunkStore _store;
-    private readonly BufferMetricsCounter _metrics;
     private readonly BufferEventBroadcaster _events;
-    private readonly Action? _signalSpaceAvailable;
+    private readonly BufferMetricsCounter _metrics;
     private readonly Func<StoredChunk, CancellationToken, ValueTask>? _onChunkReleased;
     private readonly Action<StoredChunk>? _onChunkTerminal;
+    private readonly Action? _signalSpaceAvailable;
+    private readonly IChunkStore _store;
 
     public DurableBufferReader(
         ChannelReader<StoredChunk> channelReader,
@@ -49,20 +49,6 @@ internal sealed class DurableBufferReader : IDurableBufferReader
             BufferEventType.BufferChunkCompleted, chunk.Id.Value, chunk: chunk));
     }
 
-    public async ValueTask ReleaseAsync(
-        StoredChunk chunk,
-        CancellationToken cancellationToken = default)
-    {
-        if (_onChunkReleased is not null)
-        {
-            await _onChunkReleased(chunk, cancellationToken);
-        }
-        _metrics.ChunkReleased();
-        _events.Publish(BufferEvent.Create(
-            BufferEventType.BufferChunkReleased, chunk.Id.Value,
-            detail: "Released for retry", chunk: chunk));
-    }
-
     public async ValueTask DeadLetterAsync(
         StoredChunk chunk,
         string? reason = null,
@@ -77,5 +63,19 @@ internal sealed class DurableBufferReader : IDurableBufferReader
         _events.Publish(BufferEvent.Create(
             BufferEventType.BufferChunkDeadLettered, deadLettered.Id.Value,
             detail: reason, chunk: deadLettered));
+    }
+
+    public async ValueTask ReleaseAsync(
+            StoredChunk chunk,
+        CancellationToken cancellationToken = default)
+    {
+        if (_onChunkReleased is not null)
+        {
+            await _onChunkReleased(chunk, cancellationToken);
+        }
+        _metrics.ChunkReleased();
+        _events.Publish(BufferEvent.Create(
+            BufferEventType.BufferChunkReleased, chunk.Id.Value,
+            detail: "Released for retry", chunk: chunk));
     }
 }

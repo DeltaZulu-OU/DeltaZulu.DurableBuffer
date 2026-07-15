@@ -11,12 +11,12 @@ public interface IDurableBufferReader
         StoredChunk chunk,
         CancellationToken cancellationToken = default);
 
-    ValueTask ReleaseAsync(
-        StoredChunk chunk,
-        CancellationToken cancellationToken = default);
-
     ValueTask DeadLetterAsync(
         StoredChunk chunk,
         string? reason = null,
+        CancellationToken cancellationToken = default);
+
+    ValueTask ReleaseAsync(
+            StoredChunk chunk,
         CancellationToken cancellationToken = default);
 }

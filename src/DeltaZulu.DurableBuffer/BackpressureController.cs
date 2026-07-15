@@ -5,8 +5,8 @@ namespace DeltaZulu.DurableBuffer;
 
 internal sealed class BackpressureController
 {
-    private readonly DurableBufferOptions _options;
     private const double PressureThreshold = 0.85;
+    private readonly DurableBufferOptions _options;
 
     public BackpressureController(DurableBufferOptions options)
     {

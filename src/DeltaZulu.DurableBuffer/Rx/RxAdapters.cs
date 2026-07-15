@@ -5,20 +5,11 @@ namespace DeltaZulu.DurableBuffer.Rx;
 
 public static class RxAdapters
 {
-    public static IRxPublisher<T> ToRxPublisher<T>(this IAsyncEnumerable<T> source)
-    {
-        ArgumentNullException.ThrowIfNull(source);
-        return new AsyncEnumerableRxPublisher<T>(source);
-    }
-
     public static IAsyncEnumerable<T> ToAsyncEnumerable<T>(this IRxPublisher<T> publisher, int requestBatchSize = 1)
     {
         ArgumentNullException.ThrowIfNull(publisher);
 
-        if (requestBatchSize <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(requestBatchSize));
-        }
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(requestBatchSize);
 
         return ReadAll(publisher, requestBatchSize);
     }
@@ -35,13 +26,18 @@ public static class RxAdapters
         return new ObservableRxEventStream<TEvent>(observable);
     }
 
+    public static IRxPublisher<T> ToRxPublisher<T>(this IAsyncEnumerable<T> source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return new AsyncEnumerableRxPublisher<T>(source);
+    }
+
     private static async IAsyncEnumerable<T> ReadAll<T>(
         IRxPublisher<T> publisher,
         int requestBatchSize,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var channel = Channel.CreateBounded<T>(new BoundedChannelOptions(requestBatchSize * 2)
-        {
+        var channel = Channel.CreateBounded<T>(new BoundedChannelOptions(requestBatchSize * 2) {
             SingleReader = true,
             SingleWriter = false,
             FullMode = BoundedChannelFullMode.Wait
@@ -86,14 +82,21 @@ public static class RxAdapters
             private long _demand;
             private int _state;
 
-            public void Start() => _ = Task.Run(PumpAsync);
+            public ValueTask CancelAsync(CancellationToken cancellationToken = default)
+            {
+                if (Interlocked.Exchange(ref _state, 2) == 0)
+                {
+                    _cts.Cancel();
+                }
+
+                return ValueTask.CompletedTask;
+            }
+
+            public async ValueTask DisposeAsync() => await CancelAsync();
 
             public ValueTask RequestAsync(long count, CancellationToken cancellationToken = default)
             {
-                if (count <= 0)
-                {
-                    throw new ArgumentOutOfRangeException(nameof(count));
-                }
+                ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
 
                 if (Volatile.Read(ref _state) != 0)
                 {
@@ -107,17 +110,7 @@ public static class RxAdapters
                 return ValueTask.CompletedTask;
             }
 
-            public ValueTask CancelAsync(CancellationToken cancellationToken = default)
-            {
-                if (Interlocked.Exchange(ref _state, 2) == 0)
-                {
-                    _cts.Cancel();
-                }
-
-                return ValueTask.CompletedTask;
-            }
-
-            public async ValueTask DisposeAsync() => await CancelAsync();
+            public void Start() => _ = Task.Run(PumpAsync);
 
             private async Task PumpAsync()
             {
@@ -167,11 +160,7 @@ public static class RxAdapters
 
         public IRxSubscription? Subscription { get; private set; }
 
-        public void OnSubscribe(IRxSubscription subscription)
-        {
-            Subscription = subscription;
-            _onSubscribed.TrySetResult();
-        }
+        public void OnCompleted(RxCompletion completion) => writer.TryComplete(completion.Exception);
 
         public async ValueTask OnNextAsync(T item, CancellationToken cancellationToken = default)
         {
@@ -183,40 +172,13 @@ public static class RxAdapters
             }
         }
 
-        public void OnCompleted(RxCompletion completion)
+        public void OnSubscribe(IRxSubscription subscription)
         {
-            writer.TryComplete(completion.Exception);
+            Subscription = subscription;
+            _onSubscribed.TrySetResult();
         }
 
-        public async Task WaitForSubscriptionAsync(CancellationToken cancellationToken)
-        {
-            await _onSubscribed.Task.WaitAsync(cancellationToken);
-        }
-    }
-
-    private sealed class RxEventStreamObservable<TEvent>(IRxEventStream<TEvent> stream) : IObservable<TEvent>
-    {
-        public IDisposable Subscribe(IObserver<TEvent> observer)
-        {
-            ArgumentNullException.ThrowIfNull(observer);
-            return stream.Subscribe(new Sink(observer));
-        }
-
-        private sealed class Sink(IObserver<TEvent> observer) : IRxEventSink<TEvent>
-        {
-            public void OnEvent(TEvent evt) => observer.OnNext(evt);
-
-            public void OnCompleted(RxCompletion completion)
-            {
-                if (completion.Exception is not null)
-                {
-                    observer.OnError(completion.Exception);
-                    return;
-                }
-
-                observer.OnCompleted();
-            }
-        }
+        public async Task WaitForSubscriptionAsync(CancellationToken cancellationToken) => await _onSubscribed.Task.WaitAsync(cancellationToken);
     }
 
     private sealed class ObservableRxEventStream<TEvent>(IObservable<TEvent> observable) : IRxEventStream<TEvent>
@@ -234,6 +196,31 @@ public static class RxAdapters
             public void OnError(Exception error) => sink.OnCompleted(RxCompletion.Failure(error));
 
             public void OnNext(TEvent value) => sink.OnEvent(value);
+        }
+    }
+
+    private sealed class RxEventStreamObservable<TEvent>(IRxEventStream<TEvent> stream) : IObservable<TEvent>
+    {
+        public IDisposable Subscribe(IObserver<TEvent> observer)
+        {
+            ArgumentNullException.ThrowIfNull(observer);
+            return stream.Subscribe(new Sink(observer));
+        }
+
+        private sealed class Sink(IObserver<TEvent> observer) : IRxEventSink<TEvent>
+        {
+            public void OnCompleted(RxCompletion completion)
+            {
+                if (completion.Exception is not null)
+                {
+                    observer.OnError(completion.Exception);
+                    return;
+                }
+
+                observer.OnCompleted();
+            }
+
+            public void OnEvent(TEvent evt) => observer.OnNext(evt);
         }
     }
 }
