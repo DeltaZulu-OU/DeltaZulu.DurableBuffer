@@ -282,7 +282,23 @@ public sealed class DurableBufferHost<T> : IAsyncDisposable
                 }
 
                 UpdateDispatchPressure(DispatchWaitReason.None);
-                await _chunkChannel.Writer.WriteAsync(chunk, cancellationToken);
+                try
+                {
+                    await _chunkChannel.Writer.WriteAsync(chunk, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    _catalog.TryMarkAvailable(chunk);
+                    UpdateDispatchPressure(DispatchWaitReason.Stopping);
+                    break;
+                }
+                catch (ChannelClosedException)
+                {
+                    _catalog.TryMarkAvailable(chunk);
+                    UpdateDispatchPressure(DispatchWaitReason.Stopping);
+                    break;
+                }
+
                 UpdateDispatchPressure(DispatchWaitReason.None);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
