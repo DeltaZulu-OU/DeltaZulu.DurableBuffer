@@ -1,17 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-	<OutputType>Library</OutputType>
-	<PackageId>DeltaZulu.DurableBuffer</PackageId>
-	<Title>DeltaZulu Durable Buffer</Title>
-	<Description>Durable disk-backed buffering, backpressure, recovery, and dead-lettering for .NET.</Description>
-	<Authors>DeltaZulu</Authors>
-	<GenerateDocumentationFile>true</GenerateDocumentationFile>
-	<IsPackable>true</IsPackable>
+    <RootNamespace>DeltaZulu.DurableBuffer</RootNamespace>
+    <AssemblyName>DeltaZulu.DurableBuffer</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <PackageId>DeltaZulu.DurableBuffer</PackageId>
+    <Title>DeltaZulu Durable Buffer</Title>
+    <Description>Durable disk-backed buffering, backpressure, recovery, and dead-lettering for .NET.</Description>
   </PropertyGroup>
   <ItemGroup>
-	<InternalsVisibleTo Include="DeltaZulu.DurableBuffer.Tests" />
+    <InternalsVisibleTo Include="DeltaZulu.DurableBuffer.Tests" />
   </ItemGroup>
   <ItemGroup>
-	<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
   </ItemGroup>
 </Project>
