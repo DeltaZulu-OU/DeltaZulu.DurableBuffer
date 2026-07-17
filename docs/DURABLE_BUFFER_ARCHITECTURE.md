@@ -62,12 +62,17 @@ Offset  Size  Content
 N       4     Record length (uint32 LE)
 N+4     L     Record payload (L bytes)
 --- footer ---
-F       4     Footer magic "DZFE" (0x44 0x5A 0x46 0x45)
-F+4     4     Payload byte count (uint32 LE)
-F+8     32    SHA-256 hash of header + records
+F       4     Record count (uint32 LE)
+F+4     32    SHA-256 hash of encoded records
+F+36    4     Footer magic "DZFE" (0x44 0x5A 0x46 0x45)
 ```
 
 Header size: 48 bytes. Footer size: 40 bytes.
+
+The footer is laid out as a 4-byte record count, a 32-byte SHA-256 hash, and the
+4-byte footer magic. The hash covers the encoded record region (each record's
+length prefix and payload), while validation also verifies the header magic and
+version, footer magic, record count, and exact record boundaries.
 
 ## Backpressure states
 

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Buffers.Binary;
 using DeltaZulu.DurableBuffer.Chunks;
 using DeltaZulu.DurableBuffer.Configuration;
 
@@ -42,6 +43,25 @@ public sealed class ChunkFormatTests
     }
 
     [TestMethod]
+    public void ValidateChecksum_CorruptedHeader_ReturnsFalse()
+    {
+        var data = BuildTestChunk("hello");
+        data[ChunkFormat.VersionOffset]++;
+
+        Assert.IsFalse(ChunkFormat.ValidateChecksum(data));
+    }
+
+    [TestMethod]
+    public void ValidateChecksum_MismatchedFooterRecordCount_ReturnsFalse()
+    {
+        var data = BuildTestChunk("hello", "world");
+        var footerStart = data.Length - ChunkFormat.FooterSize;
+        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(footerStart), 3);
+
+        Assert.IsFalse(ChunkFormat.ValidateChecksum(data));
+    }
+
+    [TestMethod]
     public void ValidateChecksum_TooSmall_ReturnsFalse() => Assert.IsFalse(ChunkFormat.ValidateChecksum(new byte[10]));
 
     [TestMethod]
@@ -65,6 +85,15 @@ public sealed class ChunkFormatTests
         Assert.ThrowsExactly<InvalidDataException>(
             () => ChunkFormat.ReadRecords(data));
 
+    }
+
+    [TestMethod]
+    public void ReadRecords_CorruptedChunk_Throws()
+    {
+        var data = BuildTestChunk("test");
+        data[ChunkFormat.HeaderSize + ChunkFormat.RecordLengthSize] ^= 0xFF;
+
+        Assert.ThrowsExactly<InvalidDataException>(() => ChunkFormat.ReadRecords(data));
     }
 
     [TestMethod]

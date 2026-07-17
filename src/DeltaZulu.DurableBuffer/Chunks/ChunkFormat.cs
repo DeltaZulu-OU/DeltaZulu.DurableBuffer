@@ -23,14 +23,9 @@ public static class ChunkFormat
     public static IReadOnlyList<ReadOnlyMemory<byte>> ReadRecords(ReadOnlyMemory<byte> chunkData)
     {
         var span = chunkData.Span;
-        if (span.Length < HeaderSize + FooterSize)
+        if (!ValidateChecksum(span))
         {
-            throw new InvalidDataException("Chunk data is too small to contain header and footer.");
-        }
-
-        if (!span[..4].SequenceEqual(Magic))
-        {
-            throw new InvalidDataException("Invalid chunk magic bytes.");
+            throw new InvalidDataException("Chunk data is invalid or its integrity check failed.");
         }
 
         var records = new List<ReadOnlyMemory<byte>>();
@@ -56,17 +51,20 @@ public static class ChunkFormat
 
     public static bool ValidateChecksum(ReadOnlySpan<byte> chunkData)
     {
-        if (chunkData.Length < HeaderSize + FooterSize)
-        {
-            return false;
-        }
-
-        if (!chunkData[^4..].SequenceEqual(FooterMagic))
+        if (chunkData.Length < HeaderSize + FooterSize ||
+            !chunkData[..Magic.Length].SequenceEqual(Magic) ||
+            chunkData[VersionOffset] != Version ||
+            !chunkData[^FooterMagic.Length..].SequenceEqual(FooterMagic))
         {
             return false;
         }
 
         var footerStart = chunkData.Length - FooterSize;
+        if (!HasValidRecordLayout(chunkData, footerStart))
+        {
+            return false;
+        }
+
         var recordRegion = chunkData[HeaderSize..footerStart];
 
         Span<byte> computed = stackalloc byte[32];
@@ -74,5 +72,36 @@ public static class ChunkFormat
 
         var stored = chunkData.Slice(footerStart + FooterChecksumOffset, 32);
         return computed.SequenceEqual(stored);
+    }
+
+    private static bool HasValidRecordLayout(ReadOnlySpan<byte> chunkData, int footerStart)
+    {
+        var expectedRecordCount = BinaryPrimitives.ReadInt32LittleEndian(chunkData.Slice(footerStart, sizeof(int)));
+        if (expectedRecordCount < 0)
+        {
+            return false;
+        }
+
+        var offset = HeaderSize;
+        var recordCount = 0;
+        while (offset < footerStart)
+        {
+            if (footerStart - offset < RecordLengthSize)
+            {
+                return false;
+            }
+
+            var length = BinaryPrimitives.ReadInt32LittleEndian(chunkData.Slice(offset, RecordLengthSize));
+            offset += RecordLengthSize;
+            if (length < 0 || length > footerStart - offset)
+            {
+                return false;
+            }
+
+            offset += length;
+            recordCount++;
+        }
+
+        return offset == footerStart && recordCount == expectedRecordCount;
     }
 }
