@@ -58,6 +58,11 @@ jobs:
 
           echo "package_version=$source_version" >> "$GITHUB_OUTPUT"
 
+      - name: Verify the version moves forward
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/verify-version-moves-forward.sh DeltaZulu.DurableBuffer "${{ steps.version.outputs.package_version }}"
+
       - name: Restore locked dependencies
         run: dotnet restore DeltaZulu.DurableBuffer.slnx --locked-mode
 
